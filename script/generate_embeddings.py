@@ -26,13 +26,11 @@ def generate_embeddings_batch_embed(register: BatchedInference, model_id: str, t
     total_texts = len(texts)
     logger.info(f"Generating embeddings for {total_texts} texts using model '{model_key}' ({model_id}) via embed library...")
 
-    # embed handles batching internally, but we might still process in chunks
-    # to manage memory or track progress more granularly if needed.
-    # However, the simplest way is to send all texts at once.
-    # Let's process in larger chunks to show progress with tqdm.
-    # Infinity/embed's internal batching will optimize GPU usage.
-    # We define a processing chunk size, not the inference batch size.
-    processing_chunk_size = batch_size * 10 # Process 10x the inference batch size for tqdm updates
+    # embed 处理批量内部处理，但我们仍然分块处理以便管理内存和更细粒度地跟踪进度
+    # 设置一个适中的处理块大小，以平衡内存使用和处理效率
+    # 对于CPU环境，使用较小的处理块大小
+    processing_chunk_size = batch_size  # 不再将处理块大小设置为批处理大小的10倍
+    logger.info(f"Using processing chunk size: {processing_chunk_size}")
 
     futures = []
     for i in tqdm(range(0, total_texts, processing_chunk_size), desc=f"Queueing Embeddings ({model_key})"):
