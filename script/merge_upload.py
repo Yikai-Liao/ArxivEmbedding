@@ -73,7 +73,10 @@ def merge_and_upload(args):
 
         # Download the original file from the Hub to merge into
         original_file_path = None # Define outside try block for cleanup
+        df_merged = None
+        original_schema = None
         try:
+            # Original logic to download file
             logger.info(f"Downloading original {year_file} from Hub repo {repo_id}...")
             original_file_path = hf_hub_download(
                 repo_id=repo_id,
@@ -82,20 +85,25 @@ def merge_and_upload(args):
                 local_dir='.', # Download to current dir
                 token=hf_token
             )
-            logger.info(f"Loading original file: {original_file_path}")
-            df_merged = pl.read_parquet(original_file_path)
-            logger.info(f"Original {year_file} shape: {df_merged.shape}")
-            
-            original_schema = df_merged.schema
-            logger.debug(f"Original schema: {original_schema}")
-
-            if 'id' not in df_merged.columns:
-                logger.error(f"Original file {original_file_path} is missing the required 'id' column. Skipping merge for {year_file}.")
-                # Clean up downloaded original file before skipping
-                if original_file_path and os.path.exists(original_file_path):
+                 
+            # --- Load the downloaded file --- 
+            if original_file_path and os.path.exists(original_file_path):
+                 logger.info(f"Loading original file: {original_file_path}")
+                 df_merged = pl.read_parquet(original_file_path)
+                 logger.info(f"Original {year_file} shape: {df_merged.shape}")
+                 original_schema = df_merged.schema
+                 logger.debug(f"Original schema: {original_schema}")
+                 
+                 if 'id' not in df_merged.columns:
+                     logger.error(f"Original file {original_file_path} is missing the required 'id' column. Skipping merge for {year_file}.")
+                     # Clean up downloaded original file before skipping
                      try: os.remove(original_file_path)
                      except OSError: logger.warning(f"Failed to cleanup downloaded file: {original_file_path}")
-                continue 
+                     continue 
+            else:
+                 # This case means download failed before path was set
+                 logger.error(f"Could not determine or find the original file path for {year_file} after download attempt. Skipping.")
+                 continue
 
         except Exception as e:
             logger.error(f"Failed to download or load original {year_file} from Hub: {e}. Skipping merge for this year.")
@@ -166,7 +174,9 @@ def merge_and_upload(args):
                          logger.debug(f"Casting ID column in subset to {target_id_type}")
                          df_embed_subset = df_embed_subset.with_columns(pl.col('id').cast(target_id_type))
                 except Exception as cast_err:
-                    logger.warning(f"Could not cast 'id' column in {embed_file} subset to match target type {target_id_type}. Proceeding with original type. Error: {cast_err}")
+                     # Log warning but continue without casting, as update might handle it.
+                    logger.warning(f"Could not check or cast 'id' column in {embed_file} subset. Proceeding with original type. Error: {cast_err}")
+                    # Do not try to use target_id_type here as it might not be defined
 
                 # Check if the embedding column needs to be added first (shouldn't happen if logic is sound)
                 # However, let's add robustly before update
