@@ -19,6 +19,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       task_matrices: ${{ steps.create_task_matrices.outputs.task_matrices }}
+      matrix_count: ${{ steps.create_task_matrices.outputs.matrix_count }}
       total_tasks: ${{ steps.create_task_matrices.outputs.total_tasks }}
     steps:
       - name: Checkout code
@@ -149,7 +150,11 @@ jobs:
           target_matrix_count = int(os.environ['MATRIX_COUNT'])
           
           # 计算合理的矩阵数量
-          if total_tasks < target_matrix_count:
+          actual_matrix_count = target_matrix_count # Start with requested count
+          if total_tasks == 0:
+              actual_matrix_count = 0 # No tasks, no matrices
+              print("警告：没有找到任何需要处理的任务。")
+          elif total_tasks < target_matrix_count:
               # 少任务时使用更少的矩阵
               if total_tasks <= 10:
                   actual_matrix_count = 1  # 非常少的任务，使用1个矩阵
@@ -157,89 +162,106 @@ jobs:
                   actual_matrix_count = min(total_tasks // 10 + 1, 5)  # 适中的任务数，最多5个矩阵
               else:
                   actual_matrix_count = min(total_tasks // 20 + 1, 10)  # 较多任务，最多10个矩阵
+              # Ensure actual_matrix_count does not exceed total_tasks if total_tasks is very small
+              actual_matrix_count = min(actual_matrix_count, total_tasks)
               print(f"任务总数({total_tasks})少于请求的矩阵数量({target_matrix_count})，将使用{actual_matrix_count}个矩阵")
           else:
               actual_matrix_count = min(target_matrix_count, total_tasks)
           
-          # 确保至少有一个矩阵
-          actual_matrix_count = max(1, actual_matrix_count)
+          # 确保至少有一个矩阵 if there are tasks
+          if total_tasks > 0:
+              actual_matrix_count = max(1, actual_matrix_count)
+          else:
+              actual_matrix_count = 0 # Still 0 if no tasks
+
+          task_matrices_for_strategy = [] # Keep this for generating matrix IDs
           
-          # 每个矩阵处理的ID数量
-          ids_per_matrix = math.ceil(len(unique_ids) / actual_matrix_count)
-          
-          # 创建任务矩阵
-          task_matrices = []
-          for i in range(actual_matrix_count):
-              start_idx = i * ids_per_matrix
-              end_idx = min((i + 1) * ids_per_matrix, len(unique_ids))
+          if actual_matrix_count > 0:
+              # 每个矩阵处理的ID数量
+              ids_per_matrix = math.ceil(len(unique_ids) / actual_matrix_count)
               
-              if start_idx < len(unique_ids):
-                  # 当前矩阵负责的ID
-                  matrix_ids = unique_ids[start_idx:end_idx]
+              # 创建任务文件
+              os.makedirs("matrix_tasks", exist_ok=True) # Directory to hold task files
+              
+              assigned_task_count_total = 0
+              for i in range(actual_matrix_count):
+                  start_idx = i * ids_per_matrix
+                  end_idx = min((i + 1) * ids_per_matrix, len(unique_ids))
                   
-                  # 创建模型和ID的任务组合
                   matrix_tasks = []
-                  for id_value in matrix_ids:
-                      year_file = year_id_map[id_value]
-                      for model_key in model_keys:
-                          matrix_tasks.append({
-                              "id": id_value,
-                              "year_file": year_file,
-                              "model_key": model_key
-                          })
+                  if start_idx < len(unique_ids):
+                      # 当前矩阵负责的ID
+                      matrix_ids = unique_ids[start_idx:end_idx]
+                      
+                      # 创建模型和ID的任务组合
+                      for id_value in matrix_ids:
+                          year_file = year_id_map.get(id_value) # Use .get for safety
+                          if year_file: # Ensure ID was found in map
+                              for model_key in model_keys:
+                                  matrix_tasks.append({
+                                      "id": id_value,
+                                      "year_file": year_file,
+                                      "model_key": model_key
+                                  })
+                          else:
+                              print(f"警告：未找到ID {id_value} 对应的年份文件，跳过此ID。")
+
+                  # Save tasks for this matrix to a JSON file
+                  matrix_task_file = f"matrix_tasks/matrix_{i}_tasks.json"
+                  with open(matrix_task_file, "w") as f:
+                      json.dump(matrix_tasks, f)
                   
-                  task_matrices.append({
-                      "matrix_id": i,
-                      "tasks": matrix_tasks
-                  })
-          
-          # 检查分配情况
-          actual_matrices = len(task_matrices)
-          total_assigned_tasks = sum(len(matrix["tasks"]) for matrix in task_matrices)
-          print(f"创建了 {actual_matrices} 个矩阵，分配了总计 {total_assigned_tasks} 个任务")
-          
-          # 输出任务矩阵信息
-          for i, matrix in enumerate(task_matrices):
-              task_count = len(matrix["tasks"])
-              print(f"矩阵 {i}: {task_count} 个任务")
-          
-          # 保存任务矩阵到临时文件
-          with open("task_matrices.json", "w") as f:
-              json.dump(task_matrices, f)
-          
+                  assigned_task_count_total += len(matrix_tasks)
+                  print(f"矩阵 {i}: 分配了 {len(matrix_tasks)} 个任务，保存到 {matrix_task_file}")
+                  task_matrices_for_strategy.append({"matrix_id": i}) # Add matrix ID for strategy
+
+              print(f"总共分配了 {assigned_task_count_total} 个任务到 {actual_matrix_count} 个矩阵文件中。")
+
           # 输出到GitHub Actions
-          task_matrices_json = json.dumps(task_matrices)
-          # 使用新版的输出语法
+          task_matrices_json = json.dumps(task_matrices_for_strategy) # Output list of matrix IDs for strategy
+          matrix_count = actual_matrix_count # Output the actual count used
+
           with open(os.environ["GITHUB_OUTPUT"], "a") as f:
               f.write(f"task_matrices={task_matrices_json}\n")
               f.write(f"total_tasks={total_tasks}\n")
+              f.write(f"matrix_count={matrix_count}\n") # Add matrix_count output
           
-          # 上传任务矩阵作为参考
-          with open("all_tasks.json", "w") as f:
+          # 上传任务信息 (optional, for debugging)
+          with open("all_tasks_info.json", "w") as f:
               all_tasks_info = {
                   "total_unique_ids": len(unique_ids),
                   "total_models": len(model_keys),
                   "total_tasks": total_tasks,
-                  "matrices_count": actual_matrices
+                  "target_matrices_requested": target_matrix_count,
+                  "actual_matrices_created": actual_matrix_count
               }
               json.dump(all_tasks_info, f)
         shell: python # Use python shell directly
           
-      - name: Upload task definitions
+      - name: Upload individual task files
+        if: steps.create_task_matrices.outputs.matrix_count > 0 # Only upload if matrices were created
         uses: actions/upload-artifact@v4
         with:
-          name: task-definitions
-          path: |
-            task_matrices.json
-            all_tasks.json
+          name: matrix-tasks # A single artifact containing all task files
+          path: matrix_tasks/
+          retention-days: 1 # Keep task files for 1 day
+
+      - name: Upload task summary info
+        uses: actions/upload-artifact@v4
+        with:
+          name: task-summary-info
+          path: all_tasks_info.json
+          retention-days: 1
 
   process_task_matrix:
     needs: list_files_and_create_tasks
+    if: needs.list_files_and_create_tasks.outputs.matrix_count > 0 # Only run if matrices exist
     runs-on: ubuntu-latest # Consider GPU runners if available: ubuntu-latest-gpu
     strategy:
       fail-fast: false # Continue other jobs even if one fails
       matrix:
-        matrix_id: ${{ fromJson(needs.list_files_and_create_tasks.outputs.task_matrices) }}
+        # Use the generated list of matrix IDs
+        matrix_info: ${{ fromJson(needs.list_files_and_create_tasks.outputs.task_matrices) }} 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -254,235 +276,65 @@ jobs:
           python -m pip install --upgrade pip
           # Install base requirements + embedding libs
           pip install -r requirements.txt
-          pip install embed torch toml tqdm loguru huggingface_hub
+          # Ensure embed, toml, tqdm, loguru, huggingface_hub are installed (some might be in requirements.txt)
+          pip install embed torch toml tqdm loguru huggingface_hub polars
           # Add accelerate if using multi-gpu or specific optimizations
           # pip install accelerate
           # Add GPU specific libraries if using GPU runner
           # pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118 # Example for CUDA 11.8
 
-      - name: Process Tasks in Matrix
+      - name: Download tasks for this matrix
+        uses: actions/download-artifact@v4
+        with:
+          name: matrix-tasks # Name of the artifact containing task files
+          path: matrix_tasks # Download to a local directory
+
+      - name: Process Tasks using Python Script
         id: process_tasks
         env:
           HF_TOKEN: ${{ secrets.HUGGINGFACE_TOKEN }}
           REPO_ID: lyk/ArxivEmbedding
-          MATRIX_ID: ${{ matrix.matrix_id.matrix_id }}
-          MATRIX_TASKS: ${{ toJson(matrix.matrix_id.tasks) }}
+          MATRIX_ID: ${{ matrix.matrix_info.matrix_id }} # Get matrix_id from strategy
         run: |
-          import os
-          import json
-          import sys
-          from pathlib import Path
-          from collections import defaultdict
-          from huggingface_hub import hf_hub_download
-          from tqdm import tqdm
-          import polars as pl
-          from loguru import logger
-          import subprocess
-          import re
-          
-          logger.remove()
-          logger.add(sys.stderr, level="INFO", format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <level>{message}</level>")
-          
-          # 解析分配给此矩阵的任务
-          matrix_id = int(os.environ["MATRIX_ID"])
-          tasks = json.loads(os.environ["MATRIX_TASKS"])
-          
-          logger.info(f"矩阵 {matrix_id} 处理 {len(tasks)} 个任务")
-          
-          # 按年份文件分组任务，以便高效下载和处理
-          tasks_by_year_file = defaultdict(list)
-          tasks_by_model = defaultdict(list)
-          
-          for task in tasks:
-              year_file = task["year_file"]
-              model_key = task["model_key"]
-              id_value = task["id"]
-              tasks_by_year_file[year_file].append(task)
-              tasks_by_model[model_key].append(task)
-          
-          logger.info(f"任务涉及 {len(tasks_by_year_file)} 个不同年份文件和 {len(tasks_by_model)} 个不同模型")
-          
-          # 创建输出目录
-          output_dir = Path(f"matrix_output_{matrix_id}")
-          output_dir.mkdir(exist_ok=True)
-          
-          processed_tasks = []
-          failed_tasks = []
-          
-          # 创建用于追踪已处理ID的集合
-          processed_ids = set()
-          
-          # 按年份文件分组处理
-          for year_file, year_tasks in tqdm(tasks_by_year_file.items(), desc=f"处理年份文件"):
-              # 找出此年份文件需要处理的ID和模型
-              ids_to_process = set(task["id"] for task in year_tasks)
-              models_for_this_year = set(task["model_key"] for task in year_tasks)
-              
-              logger.info(f"处理 {year_file}: {len(ids_to_process)} 个ID, {len(models_for_this_year)} 个模型")
-              
-              # 下载整个年份文件
-              try:
-                  file_path = hf_hub_download(
-                      repo_id=os.environ["REPO_ID"],
-                      filename=year_file,
-                      repo_type="dataset",
-                      local_dir=".",
-                      local_dir_use_symlinks=False
-                  )
-                  logger.info(f"下载 {year_file} 到 {file_path}")
-                  
-                  # 读取数据并过滤出需要处理的ID
-                  df = pl.read_parquet(file_path)
-                  filtered_df = df.filter(pl.col("id").is_in(ids_to_process))
-                  
-                  logger.info(f"从 {year_file} 中过滤出 {filtered_df.height} 条记录（总共 {df.height} 条）")
-                  
-                  # 如果过滤后没有记录，跳过处理
-                  if filtered_df.height == 0:
-                      logger.warning(f"{year_file} 中没有找到需要处理的ID，跳过处理")
-                      continue
-                  
-                  # 保存过滤后的数据到临时文件
-                  temp_file = f"temp_{matrix_id}_{year_file}"
-                  filtered_df.write_parquet(temp_file)
-                  logger.info(f"将过滤后的数据保存到临时文件 {temp_file}")
-                  
-                  # 为每个模型处理过滤后的数据
-                  for model_key in models_for_this_year:
-                      # 跳过已处理的组合
-                      output_file = output_dir / f"embedded-{year_file}-{model_key}.parquet"
-                      
-                      logger.info(f"为 {year_file} 和模型 {model_key} 生成嵌入向量")
-                      
-                      try:
-                          # 运行嵌入生成
-                          cmd = [
-                              "python", "script/generate_embeddings.py",
-                              "--input-file", temp_file,
-                              "--output-file", str(output_file),
-                              "--model-key", model_key,
-                              "--config-file", "config.toml",
-                              "--batch-size", "32",  # 增大批处理大小
-                              "--engine", "torch",
-                              "--device", "cpu"  # 使用GPU请改为"cuda"
-                          ]
-                          
-                          logger.info(f"运行命令: {' '.join(cmd)}")
-                          process = subprocess.run(cmd, check=True, capture_output=True, text=True)
-                          
-                          if process.returncode == 0:
-                              logger.info(f"成功为 {year_file} 和模型 {model_key} 生成嵌入向量")
-                              # 记录每个成功处理的ID和模型组合
-                              for id_value in filtered_df["id"].to_list():
-                                  processed_tasks.append({
-                                      "id": id_value,
-                                      "year_file": year_file,
-                                      "model_key": model_key,
-                                      "output_file": str(output_file)
-                                  })
-                                  processed_ids.add(id_value)
-                          else:
-                              logger.error(f"命令返回非零状态码 {process.returncode}")
-                              logger.error(f"STDOUT: {process.stdout}")
-                              logger.error(f"STDERR: {process.stderr}")
-                              # 记录失败的模型和年份组合
-                              for id_value in filtered_df["id"].to_list():
-                                  failed_tasks.append({
-                                      "id": id_value,
-                                      "year_file": year_file,
-                                      "model_key": model_key,
-                                      "error": f"处理错误: {process.stderr}"
-                                  })
-                      
-                      except Exception as e:
-                          logger.error(f"运行嵌入生成时出错: {e}")
-                          for id_value in filtered_df["id"].to_list():
-                              failed_tasks.append({
-                                  "id": id_value,
-                                  "year_file": year_file,
-                                  "model_key": model_key,
-                                  "error": str(e)
-                              })
-                  
-                  # 清理临时文件
-                  try:
-                      if os.path.exists(temp_file):
-                          os.remove(temp_file)
-                  except Exception as e:
-                      logger.warning(f"无法删除临时文件 {temp_file}: {e}")
-              
-              except Exception as e:
-                  logger.error(f"下载或处理 {year_file} 时出错: {e}")
-                  for task in year_tasks:
-                      failed_tasks.append({
-                          "id": task["id"],
-                          "year_file": year_file,
-                          "model_key": task["model_key"],
-                          "error": f"下载失败: {str(e)}"
-                      })
-              
-              finally:
-                  # 清理下载的文件
-                  try:
-                      if 'file_path' in locals() and os.path.exists(file_path):
-                          os.remove(file_path)
-                  except Exception as e:
-                      logger.warning(f"无法删除下载的文件 {file_path}: {e}")
-          
-          # 检查是否所有分配的ID都已处理
-          assigned_ids = set(task["id"] for task in tasks)
-          missed_ids = assigned_ids - processed_ids
-          
-          if missed_ids:
-              logger.warning(f"有 {len(missed_ids)} 个ID未能成功处理: {list(missed_ids)[:10]}{'...' if len(missed_ids) > 10 else ''}")
-          
-          # 将结果写入JSON供artifacts使用
-          with open(output_dir / "processed_tasks.json", "w") as f:
-              json.dump(processed_tasks, f, indent=2)
-              
-          with open(output_dir / "failed_tasks.json", "w") as f:
-              json.dump(failed_tasks, f, indent=2)
-              
-          # 摘要
-          success_percent = 100 * len(processed_tasks) / len(tasks) if tasks else 0
-          logger.info(f"矩阵 {matrix_id} 完成。成功: {len(processed_tasks)} ({success_percent:.1f}%), 失败: {len(failed_tasks)}")
-          
-          # 创建易于阅读的摘要文件
-          with open(output_dir / "summary.txt", "w") as f:
-              f.write(f"矩阵 {matrix_id} 摘要\n")
-              f.write(f"==================\n")
-              f.write(f"总任务数: {len(tasks)}\n")
-              f.write(f"成功: {len(processed_tasks)} ({success_percent:.1f}%)\n")
-              f.write(f"失败: {len(failed_tasks)}\n\n")
-              
-              if failed_tasks:
-                  failure_by_reason = defaultdict(int)
-                  for task in failed_tasks:
-                      error_msg = task["error"]
-                      # 简化错误消息以便分组
-                      simplified_error = re.sub(r'\b[a-zA-Z0-9]{8,}\b', '[ID]', error_msg)
-                      simplified_error = re.sub(r'\d+', '[NUM]', simplified_error)
-                      failure_by_reason[simplified_error[:100]] += 1
-                  
-                  f.write("失败原因统计:\n")
-                  for reason, count in sorted(failure_by_reason.items(), key=lambda x: x[1], reverse=True):
-                      f.write(f"- {reason}... ({count} 次)\n")
-                  
-                  f.write("\n前10个失败任务:\n")
-                  for idx, task in enumerate(failed_tasks[:10]):
-                      f.write(f"{idx+1}. {task['year_file']} - {task['model_key']} - ID: {task['id']}: {task['error'][:100]}...\n")
+          # Define matrix_id and task_file path based on the strategy
+          MATRIX_ID=${{ matrix.matrix_info.matrix_id }}
+          TASK_FILE="matrix_tasks/matrix_${MATRIX_ID}_tasks.json"
+          OUTPUT_DIR="matrix_output_${MATRIX_ID}"
+
+          # Create output directory
+          mkdir -p $OUTPUT_DIR
+
+          echo "Processing Matrix ID: $MATRIX_ID"
+          echo "Task File: $TASK_FILE"
+          echo "Output Directory: $OUTPUT_DIR"
+
+          # Run the new Python script
+          python script/process_matrix_tasks.py \
+            --matrix-id $MATRIX_ID \
+            --task-file $TASK_FILE \
+            --output-dir $OUTPUT_DIR \
+            --config-file config.toml \
+            --repo-id $REPO_ID \
+            --batch-size 64 \
+            --engine torch \
+            --device cpu # Use "cuda" for GPU
 
       - name: Upload matrix output artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: matrix-output-${{ matrix.matrix_id.matrix_id }}
-          path: matrix_output_${{ matrix.matrix_id.matrix_id }}
+          name: matrix-output-${{ matrix.matrix_info.matrix_id }} # Use matrix_id from strategy
+          path: matrix_output_${{ matrix.matrix_info.matrix_id }} # Use matrix_id from strategy
           retention-days: 5 # Keep artifacts for 5 days
 
   merge_and_upload:
     needs: [list_files_and_create_tasks, process_task_matrix]
+    # Run only if the process_task_matrix jobs were triggered (i.e., matrix_count > 0)
+    # and ran successfully, or if matrix_count was 0 initially.
+    # We need to be careful here. Let's run it always if list_files ran,
+    # but the inner script should handle the case where no artifacts are downloaded.
+    if: always() && needs.list_files_and_create_tasks.result == 'success'
     runs-on: ubuntu-latest
-    # This job runs once after all matrix jobs are done
+    # This job runs once after all matrix jobs are done (or if none were needed)
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -561,44 +413,129 @@ jobs:
                   logger.info(f"Downloading original {year_file} from Hub...")
                   original_file_path = hf_hub_download(repo_id=repo_id, filename=year_file, repo_type='dataset', local_dir='.', local_dir_use_symlinks=False)
                   logger.info(f"Loading original file: {original_file_path}")
+                  # Ensure 'id' column is read as string/object if necessary
+                  # Let Polars infer for now, but be mindful if IDs cause issues
                   df_merged = pl.read_parquet(original_file_path)
                   logger.info(f"Original {year_file} shape: {df_merged.shape}")
+                  
+                  # Store original columns and dtypes for later verification
+                  original_schema = df_merged.schema
+                  logger.debug(f"Original schema: {original_schema}")
+
+                  # Ensure the 'id' column exists
+                  if 'id' not in df_merged.columns:
+                      logger.error(f"Original file {year_file} is missing the required 'id' column. Skipping merge.")
+                      if os.path.exists(original_file_path):
+                           os.remove(original_file_path)
+                      continue # Skip to the next year file
+
                   os.remove(original_file_path) # Clean up downloaded original
               except Exception as e:
                   logger.error(f"Failed to download or load original {year_file} from Hub: {e}. Skipping merge for this year.")
+                  # Clean up potentially downloaded file if path exists
+                  if 'original_file_path' in locals() and os.path.exists(original_file_path):
+                      try:
+                          os.remove(original_file_path)
+                      except OSError:
+                           pass # Ignore error if removal fails (e.g., file not found)
                   continue
 
               # Merge embedding columns from artifacts
               merged_cols_count = 0
+              processed_ids_for_year = set() # Track IDs processed in this year's merge
+
               for embed_file in embedding_files:
                   try:
                       logger.debug(f"Loading embedding file: {embed_file}")
                       df_embed = pl.read_parquet(embed_file)
-                      # Find the embedding column (assume it's the model_key)
-                      embed_cols = [col for col in df_embed.columns if col not in df_merged.columns and col != 'id']
-                      
-                      if not embed_cols:
-                          logger.warning(f"No new embedding columns found in {embed_file}. Skipping.")
+                      logger.debug(f"Embedding file {embed_file} shape: {df_embed.shape}, columns: {df_embed.columns}")
+
+                      # Ensure 'id' column exists in embedding file
+                      if 'id' not in df_embed.columns:
+                          logger.warning(f"Embedding file {embed_file} is missing 'id' column. Skipping.")
                           continue
-                          
-                      for embed_col_name in embed_cols:
-                          logger.debug(f"Found embedding column '{embed_col_name}' in {embed_file}")
 
-                          # Select only id and the embedding column
-                          df_embed_subset = df_embed.select(['id', embed_col_name])
+                      # Find the embedding column (assume it's the model_key used in the filename or the only non-'id' column)
+                      potential_embed_cols = [col for col in df_embed.columns if col != 'id']
 
-                          # Left join embedding column onto the main dataframe
-                          if embed_col_name not in df_merged.columns:
-                               df_merged = df_merged.join(df_embed_subset, on='id', how='left')
-                               logger.info(f"Merged column '{embed_col_name}'. New shape: {df_merged.shape}")
-                               merged_cols_count += 1
-                          else:
-                               logger.warning(f"Column '{embed_col_name}' already exists in the merged DataFrame. Skipping merge from {embed_file}.")
+                      if not potential_embed_cols:
+                          logger.warning(f"No potential embedding columns (other than 'id') found in {embed_file}. Skipping.")
+                          continue
+
+                      # Heuristic: Assume the first non-'id' column is the embedding column
+                      # Or better: extract model key from filename if possible
+                      embed_col_name = None
+                      model_match = re.search(r'embedded-.*?-([a-zA-Z0-9_.-]+)\.parquet$', os.path.basename(embed_file))
+                      if model_match:
+                           extracted_model_key = model_match.group(1)
+                           if extracted_model_key in df_embed.columns:
+                               embed_col_name = extracted_model_key
+                               logger.debug(f"Identified embedding column '{embed_col_name}' from filename {embed_file}")
+                           else:
+                               logger.warning(f"Extracted model key '{extracted_model_key}' not found as column in {embed_file}. Falling back to heuristic.")
+
+                      if not embed_col_name:
+                           if len(potential_embed_cols) == 1:
+                               embed_col_name = potential_embed_cols[0]
+                               logger.debug(f"Using the only non-id column '{embed_col_name}' as embedding column from {embed_file}")
+                           else:
+                               logger.warning(f"Could not reliably determine the embedding column in {embed_file} (found: {potential_embed_cols}). Skipping file.")
+                               continue
+
+                      # Check if this embedding column should actually be merged
+                      if embed_col_name in df_merged.columns:
+                           logger.warning(f"Column '{embed_col_name}' already exists in the merged DataFrame for {year_file}. Skipping merge from {embed_file}.")
+                           continue # Skip this file as the column exists
+
+                      logger.debug(f"Attempting to merge column '{embed_col_name}' from {embed_file}")
+
+                      # Select only id and the embedding column
+                      # Ensure 'id' type matches the main dataframe if possible
+                      try:
+                          target_id_type = df_merged['id'].dtype
+                          df_embed_subset = df_embed.select(['id', embed_col_name]).with_columns(pl.col('id').cast(target_id_type))
+                      except Exception as cast_err:
+                           logger.warning(f"Could not cast 'id' column in {embed_file} to match target type {target_id_type}. Proceeding with original type. Error: {cast_err}")
+                           df_embed_subset = df_embed.select(['id', embed_col_name])
+
+
+                      # Perform the left join
+                      df_merged_before_join = df_merged.shape
+                      df_merged = df_merged.join(df_embed_subset, on='id', how='left')
+                      df_merged_after_join = df_merged.shape
+
+                      if df_merged_after_join[0] != df_merged_before_join[0]:
+                          logger.warning(f"Join changed row count for {year_file} when merging {embed_col_name} (before: {df_merged_before_join[0]}, after: {df_merged_after_join[0]}). This might indicate duplicate IDs.")
+                          # Optional: Add check here to revert or handle duplicates if necessary
+
+                      # Verify the column was added
+                      if embed_col_name in df_merged.columns:
+                           null_count = df_merged[embed_col_name].is_null().sum()
+                           logger.info(f"Merged column '{embed_col_name}' ({df_merged_after_join[1]} total columns). Null count: {null_count}/{df_merged_after_join[0]}.")
+                           merged_cols_count += 1
+                           # Track processed IDs for this specific merge
+                           processed_ids_for_year.update(df_embed_subset['id'].unique().to_list())
+                      else:
+                           logger.error(f"Column '{embed_col_name}' was NOT added after the join operation from {embed_file}. Shape after join: {df_merged_after_join}")
+
 
                   except Exception as e:
-                      logger.error(f"Failed to process or merge embedding file {embed_file}: {e}")
+                      logger.error(f"Failed to process or merge embedding file {embed_file}: {e}", exc_info=True)
 
+              # After merging all files for the year
               if merged_cols_count > 0:
+                  # Final check on shape and schema
+                  logger.info(f"Finished merging for {year_file}. Final shape: {df_merged.shape}. Merged {merged_cols_count} new columns.")
+                  logger.debug(f"Final schema for {year_file}: {df_merged.schema}")
+                  
+                  # Optional: Validate that original columns still exist and types match
+                  for col_name, col_type in original_schema.items():
+                       if col_name not in df_merged.columns:
+                            logger.error(f"Validation Error: Original column '{col_name}' missing in final merged data for {year_file}!")
+                       elif df_merged[col_name].dtype != col_type:
+                            logger.warning(f"Validation Warning: Original column '{col_name}' dtype changed in final merged data for {year_file} (original: {col_type}, final: {df_merged[col_name].dtype}).")
+
+
                   # Save locally before upload
                   try:
                       logger.info(f"Saving final merged file locally: {local_final_path}")
