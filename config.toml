@@ -1,19 +1,22 @@
 # Arxiv categories to fetch
 category = [
-    "cs.AI",
-    "cs.CL",
-    "cs.CV",
-    "cs.LG",
-    "cs.NE",
-    "cs.RO",
-    "stat.ML",
-    "stat.TH"
+    "cs",
+    "stat",
 ]
 
 [ArxivOAI]
 base_url = "https://oaipmh.arxiv.org/oai"
-metadata_prefix = "oai_dc"
+metadata_prefix = "arXiv" # Changed from oai_dc
 request_delay_seconds = 3
 retry_delay_seconds = 60
 max_retries = 5
 batch_size = 1000
+
+[Embedding]
+[[jasper_v1]]
+model_name = "NovaSearch/jasper_en_vision_language_v1"
+
+[[conan_v1]]
+model_name = "TencentBAC/Conan-embedding-v1"
+
+
