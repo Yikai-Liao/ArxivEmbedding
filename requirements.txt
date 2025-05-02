@@ -1,0 +1,6 @@
+requests
+xmltodict
+polars
+toml
+tqdm
+loguru

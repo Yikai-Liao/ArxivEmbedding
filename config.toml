@@ -1,0 +1,19 @@
+# Arxiv categories to fetch
+category = [
+    "cs.AI",
+    "cs.CL",
+    "cs.CV",
+    "cs.LG",
+    "cs.NE",
+    "cs.RO",
+    "stat.ML",
+    "stat.TH"
+]
+
+[ArxivOAI]
+base_url = "https://oaipmh.arxiv.org/oai"
+metadata_prefix = "oai_dc"
+request_delay_seconds = 3
+retry_delay_seconds = 60
+max_retries = 5
+batch_size = 1000
