@@ -201,13 +201,17 @@ jobs:
                                # print(f"  需要任务 (null): {id_value} - {model_key}")
                            elif isinstance(embedding_value, (list, np.ndarray)): # Check if it's list-like
                                try:
-                                   # Convert to numpy array if it's a list, then check if all elements are zero
-                                   if all(v == 0.0 for v in embedding_value):
+                                   # --- Use NumPy allclose for robust near-zero check --- 
+                                   emb_array = np.array(embedding_value, dtype=np.float32)
+                                   # Compare against a zero vector of the same shape
+                                   # Use absolute tolerance (atol), relative tolerance (rtol) is less relevant for comparing to zero.
+                                   if np.allclose(emb_array, 0, atol=1e-7):
+                                   # --- End NumPy allclose check ---
                                         is_missing_or_zero = True
-                                        # print(f"  需要任务 (zero): {id_value} - {model_key}")
-                               except TypeError:
-                                   # Handle cases where elements are not comparable to 0.0
-                                   print(f"  警告: 无法检查 {id_value} - {model_key} 的值是否为零向量 (类型错误)。假设不需要处理。")
+                                        # print(f"  需要任务 (near zero): {id_value} - {model_key}")
+                               except Exception as e: # Catch broader errors
+                                   # Handle cases where elements are not comparable to 0.0 or other conversion errors
+                                   print(f"  警告: 检查 {id_value} - {model_key} 的值是否为零向量时出错: {e}。假设不需要处理。")
                                    pass # Assume it's not a zero vector if check fails
                            # else: Value exists and is not list-like or not zero, skip task
                            
