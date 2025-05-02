@@ -40,62 +40,65 @@ def format_category_for_oai(category_string):
 # --- Helper Functions ---
 
 def parse_record(record):
-    """Parses a single OAI record (dict) and extracts relevant metadata."""
-    metadata = record.get("metadata", {}).get("oai_dc:dc", {})
+    """Parses a single OAI record (dict) using the arXiv metadata format."""
+    # Adjust the path to the metadata based on the arXiv format structure
+    metadata = record.get("metadata", {}).get("arXiv", {})
     if not metadata:
+        logger.warning(f"Could not find 'arXiv' metadata in record: {record.get('header', {}).get('identifier')}")
         return None
 
-    # Helper to extract potentially list-based fields
-    def get_field(data, key):
-        value = data.get(key)
-        if isinstance(value, list):
-            # Filter out potential non-string elements if any mixed types occur
-            return [str(item) for item in value if isinstance(item, str)]
-        elif isinstance(value, str):
-            return [value]
-        return []
-
-    # Extract fields, ensuring lists for authors/creators
-    identifier = get_field(metadata, 'dc:identifier')
-    # Find the primary arXiv ID (usually the last identifier)
-    arxiv_id = None
-    for ident in identifier:
-        if 'oai:arXiv.org:' in ident:
-            arxiv_id = ident.replace('oai:arXiv.org:', '')
-            break
-        # Handle potential DOI or other identifiers if needed, but prioritize arXiv ID
-        if ident.startswith('http://arxiv.org/abs/'):
-             arxiv_id = ident.split('/')[-1]
-
-
-    if not arxiv_id: # Skip if no clear arXiv ID found
-        logger.warning(f"Could not extract arXiv ID from identifiers: {identifier}")
+    arxiv_id = metadata.get("id")
+    if not arxiv_id:
+        logger.warning(f"Could not extract arXiv ID from metadata: {metadata}")
         return None
 
-    title = get_field(metadata, 'dc:title')
-    authors = get_field(metadata, 'dc:creator')
-    abstract = get_field(metadata, 'dc:description')
-    dates = get_field(metadata, 'dc:date') # Usually contains submission/update dates
-    subjects = get_field(metadata, 'dc:subject') # Extract categories/subjects
-    types = get_field(metadata, 'dc:type')
-    publisher = get_field(metadata, 'dc:publisher')
-    rights = get_field(metadata, 'dc:rights')
-    language = get_field(metadata, 'dc:language')
+    title = metadata.get("title", '').replace('\n', ' ').strip()
+    abstract = metadata.get("abstract", '').replace('\n', ' ').strip()
+    created_date = metadata.get("created")
+    updated_date = metadata.get("updated")
+    license_url = metadata.get("license")
 
-    # Use the first date found as the primary date
-    date = dates[0] if dates else None
+    # Parse authors
+    authors_list = []
+    authors_data = metadata.get("authors", {}).get("author")
+    if authors_data:
+        # Ensure it's a list even if there's only one author
+        if not isinstance(authors_data, list):
+            authors_data = [authors_data]
+        for author in authors_data:
+            if isinstance(author, dict):
+                keyname = author.get("keyname", "")
+                forenames = author.get("forenames", "")
+                # Combine forenames and keyname for a full name string
+                full_name = f"{forenames} {keyname}".strip()
+                if full_name:
+                    authors_list.append(full_name)
+            elif isinstance(author, str): # Handle potential simpler structures
+                 authors_list.append(author)
+
+    # Categories are space-separated in the arXiv format
+    categories_str = metadata.get("categories", "")
+    categories_list = categories_str.split() if categories_str else []
+
+    # Use updated_date as the primary date if available, otherwise created_date
+    primary_date = updated_date or created_date
 
     return {
         "id": arxiv_id,
-        "title": title[0] if title else None,
-        "authors": authors,
-        "abstract": abstract[0] if abstract else None,
-        "date": date,
-        "categories": subjects, # Add categories
-        "types": types, # Add types
-        "publisher": publisher[0] if publisher else None,
-        "rights": rights, # Add rights
-        "language": language[0] if language else None # Add language
+        "title": title,
+        "authors": authors_list,
+        "abstract": abstract,
+        "date": primary_date, # Using updated/created date
+        "categories": categories_list,
+        # Add new fields from arXiv format
+        "created": created_date,
+        "updated": updated_date,
+        "license": license_url,
+        # Removed fields not present in arXiv format:
+        # "types": None,
+        # "publisher": None,
+        # "rights": None,
+        # "language": None
     }
 
 
@@ -283,29 +286,37 @@ def main():
         # --- Convert to Polars DataFrame and Save ---
         logger.info(f"Converting {len(year_data)} records for year {year} to DataFrame...")
         try:
-            # Define schema for consistency, especially for list types
+            # Define schema for consistency, reflecting arXiv format (removed unused columns)
             schema = {
                 "id": pl.Utf8,
                 "title": pl.Utf8,
                 "authors": pl.List(pl.Utf8),
                 "abstract": pl.Utf8,
-                "date": pl.Utf8,
-                "categories": pl.List(pl.Utf8), # Add schema for categories
-                "types": pl.List(pl.Utf8),      # Add schema for types
-                "publisher": pl.Utf8,
-                "rights": pl.List(pl.Utf8),     # Add schema for rights
-                "language": pl.Utf8
+                "date": pl.Utf8, # Represents updated/created date
+                "categories": pl.List(pl.Utf8),
+                "created": pl.Utf8,
+                "updated": pl.Utf8,
+                "license": pl.Utf8,
+                # Removed columns:
+                # "types": pl.List(pl.Utf8),
+                # "publisher": pl.Utf8,
+                # "rights": pl.List(pl.Utf8),
+                # "language": pl.Utf8
             }
-            df = pl.DataFrame(year_data, schema=schema)
+            new_df = pl.DataFrame(year_data, schema=schema)
 
             # Optional: Deduplicate based on ID, keeping the first occurrence
-            df = df.unique(subset=["id"], keep="first")
-            logger.info(f"DataFrame shape after deduplication: {df.shape}")
+            # Sort by 'updated' date descending before deduplicating to keep the most recent metadata if IDs clash across fetches
+            final_df = new_df.sort("updated", descending=True, nulls_last=True).unique(subset=["id"], keep="first")
+            logger.info(f"DataFrame shape after deduplication: {final_df.shape}")
 
+            # Sort final output by ID
+            final_df = final_df.sort("id")
 
+            # Ensure output_file is defined in this scope before use
             output_file = output_dir / f"{year}.parquet"
-            logger.info(f"Saving DataFrame to {output_file}...")
-            df.write_parquet(output_file, compression='zstd')
+            logger.info(f"Saving final DataFrame to {output_file}...")
+            final_df.write_parquet(output_file, compression='zstd')
             logger.info(f"Successfully saved {output_file}")
 
         except Exception as e:

@@ -4,3 +4,7 @@ polars
 toml
 tqdm
 loguru
+feedparser
+datasets
+huggingface_hub
+pyarrow
