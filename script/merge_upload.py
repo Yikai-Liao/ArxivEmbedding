@@ -154,12 +154,7 @@ def merge_and_upload(args):
 
 
                 # --- Perform Merge/Update ---
-                if embed_col_name in df_merged.columns:
-                    logger.warning(f"Column '{embed_col_name}' already exists in the main DataFrame for {year_file}. Skipping merge from {embed_file} to avoid overwriting.")
-                    all_merged_cols.add(embed_col_name) # Add to set even if skipped, indicates it exists
-                    continue
-
-                logger.debug(f"Merging column '{embed_col_name}' from {embed_file} into {year_file} data.")
+                logger.debug(f"Preparing to update column '{embed_col_name}' from {embed_file} into {year_file} data.")
 
                 # Select only id and the embedding column for update
                 df_embed_subset = df_embed.select(['id', embed_col_name])
