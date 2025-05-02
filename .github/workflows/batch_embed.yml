@@ -64,244 +64,184 @@ jobs:
           
           # List files from Hub
           api = HfApi()
-          repo_files = api.list_repo_files(repo_id=os.environ['REPO_ID'], repo_type='dataset')
-          # Filter for YYYY.parquet files (e.g., 2018.parquet, 2024.parquet)
-          # Exclude current.parquet and non-parquet files
+          repo_id = os.environ['REPO_ID']
+          repo_files = api.list_repo_files(repo_id=repo_id, repo_type='dataset')
           year_files = [f for f in repo_files if f.endswith('.parquet') and f[:-len('.parquet')].isdigit()]
           
-          # 如果指定了年份，只处理那些年份
           if target_years:
               year_files = [f for f in year_files if any(year in f for year in target_years)]
               
           print(f"Found yearly files to process: {year_files}")
           
-          # 解析配置文件中的模型
+          # 解析配置文件中的模型和维度
           config = toml.load("config.toml")
-          embedding_configs = {}
-          
-          # 打印配置文件结构以便调试
-          print("配置文件结构:")
-          for key, value in config.items():
-              print(f"  {key}: {type(value)}")
-              if isinstance(value, dict):
-                  for subkey in value.keys():
-                      print(f"    - {subkey}")
-          
-          # 正确处理[Embedding.XXX]格式
-          if "Embedding" in config and isinstance(config["Embedding"], dict):
-              embedding_section = config["Embedding"]
-              for key, value in embedding_section.items():
-                  embedding_configs[key] = value
-                  print(f"找到模型配置: {key} -> {value}")
-          
-          model_keys = list(embedding_configs.keys())
+          embedding_configs = config.get("Embedding", {})
+          model_dims = {k: v.get("dimension") for k, v in embedding_configs.items() if isinstance(v, dict) and "dimension" in v}
+          model_keys = list(model_dims.keys())
           
           if not model_keys:
-              print("错误: 无法从config.toml中找到模型配置。")
+              print("错误: 无法从config.toml中找到带有维度的模型配置。")
               sys.exit(1)
           
-          print(f"Found model keys: {model_keys}")
-          print(f"Models with configurations:")
-          for k, v in embedding_configs.items():
-              print(f"  - {k}: {v}")
+          print(f"Found model keys with dimensions: {model_dims}")
           
-          # 新的基于ID的任务分配方法
-          # 收集所有年份文件中的ID
-          all_ids = []
-          year_id_map = {}  # 记录每个ID属于哪个年份文件
-
-          print("开始下载并读取所有年份文件的ID...")
-          for year_file in tqdm(year_files, desc="读取文件ID"):
+          # --- Efficient Task Checking using Polars ---
+          needed_tasks = []
+          total_potential_tasks = 0
+          threshold = 1e-7 # Tolerance for zero check
+          
+          print(f"开始检查文件并使用 Polars 表达式筛选任务 (阈值: {threshold})...")
+          
+          for year_file in tqdm(year_files, desc="检查年份文件"):
+              file_path = None
               try:
-                  # 下载年份文件
+                  print(f"检查文件: {year_file}")
                   file_path = hf_hub_download(
-                      repo_id=os.environ['REPO_ID'],
+                      repo_id=repo_id,
                       filename=year_file,
                       repo_type="dataset",
                       local_dir=".",
                   )
                   
-                  # 只读取ID列，减少内存使用
-                  df = pl.read_parquet(file_path, columns=["id"])
-                  file_ids = df["id"].to_list()
+                  df_year = pl.read_parquet(file_path)
+                  schema = df_year.schema
+                  print(f"  文件 {year_file} schema: {list(schema.keys())}")
+                  total_potential_tasks += df_year.height * len(model_keys) # Rough estimate
                   
-                  # 记录ID与年份文件的对应关系
-                  for id_value in file_ids:
-                      year_id_map[id_value] = year_file
+                  # Iterate through each model we need embeddings for
+                  for model_key, expected_dim in model_dims.items():
+                      print(f"  检查模型: {model_key}")
+                      
+                      # Case 1: Column doesn't exist -> All IDs for this model are tasks
+                      if model_key not in schema:
+                          print(f"    列 '{model_key}' 不存在，将所有 {df_year.height} 个 ID 添加到任务列表。")
+                          tasks_for_model = [{"id": row_id, "year_file": year_file, "model_key": model_key}
+                                             for row_id in df_year.get_column("id").to_list()]
+                          needed_tasks.extend(tasks_for_model)
+                          continue # Move to the next model
+                      
+                      # Case 2: Column exists, check for null or near-zero vectors
+                      try:
+                           # Define the filter condition using Polars expressions
+                           is_null_expr = pl.col(model_key).is_null()
+                           # Check if it's Array type first to avoid errors on non-list columns
+                           # Use .meta.eq instead of | for dtype checking if Polars version allows
+                           is_list_or_array_expr = pl.col(model_key).dtype.is_list() | pl.col(model_key).dtype.is_array() 
+                           
+                           is_near_zero_expr = (
+                                pl.when(is_list_or_array_expr)
+                                .then(
+                                    pl.col(model_key).list.eval( 
+                                        pl.element().abs() < threshold 
+                                    ).list.all() 
+                                 )
+                                .otherwise(False) # Not near zero if not list/array
+                           )
+                           
+                           # --- DEBUGGING START --- 
+                           # Calculate counts for each condition separately
+                           null_count = df_year.filter(is_null_expr).height
+                           # Only check near-zero for non-null rows of the correct type
+                           near_zero_count = df_year.filter(is_near_zero_expr & (~is_null_expr) & is_list_or_array_expr).height
+                           print(f"    调试: 模型 '{model_key}' - Null count: {null_count}")
+                           print(f"    调试: 模型 '{model_key}' - Near-zero count (checked on non-null list/array): {near_zero_count}")
+                           # --- DEBUGGING END --- 
+                           
+                           # Combine conditions: null OR near-zero
+                           filter_condition = is_null_expr | is_near_zero_expr
+                           
+                           # Apply the filter and select the IDs
+                           ids_to_process_df = df_year.filter(filter_condition).select("id")
+                           ids_to_process = ids_to_process_df.get_column("id").to_list()
+                           
+                           count = len(ids_to_process)
+                           if count > 0:
+                               print(f"    发现 {count} 个需要处理的任务 (null 或 near-zero vector)。")
+                               tasks_for_model = [{"id": row_id, "year_file": year_file, "model_key": model_key}
+                                                  for row_id in ids_to_process]
+                               needed_tasks.extend(tasks_for_model)
+                           else:
+                                print(f"    所有行的 '{model_key}' 向量都已存在且非零。")
+                                # --- DEBUGGING START: Inspect non-zero rows --- 
+                                try:
+                                     # Select rows that were *not* filtered out (should be non-null and not near-zero)
+                                     not_processed_df = df_year.filter(~filter_condition).select(['id', model_key])
+                                     sample_size = min(5, not_processed_df.height) # Show up to 5 samples
+                                     if sample_size > 0:
+                                         print(f"    调试: 抽查 {sample_size} 个未被处理的 '{model_key}' 行:")
+                                         sample_df = not_processed_df.sample(n=sample_size, seed=42) # Use seed for reproducibility
+                                         for row in sample_df.iter_rows(named=True):
+                                             row_id = row['id']
+                                             value = row[model_key]
+                                             if isinstance(value, (list, np.ndarray)):
+                                                  value_preview = str(np.array(value[:5])) + "..." # Show first 5 elements
+                                                  value_sum = np.sum(value)
+                                                  print(f"      - ID: {row_id}, Value Preview: {value_preview}, Sum: {value_sum:.4e}")
+                                             else:
+                                                  print(f"      - ID: {row_id}, Value: {value} (Type: {type(value)})")
+                                except Exception as debug_err:
+                                     print(f"    调试: 抽查未处理行时出错: {debug_err}")
+                                # --- DEBUGGING END --- 
+                                
+                      except Exception as filter_err:
+                           print(f"    处理模型 '{model_key}' 的筛选条件时出错: {filter_err}。将假设所有任务都需要处理。")
+                           # Fallback: Add all IDs for this model if filtering fails
+                           tasks_for_model = [{"id": row_id, "year_file": year_file, "model_key": model_key}
+                                              for row_id in df_year.get_column("id").to_list()]
+                           needed_tasks.extend(tasks_for_model)
                   
-                  # 收集所有ID
-                  all_ids.extend(file_ids)
+                  # Clean up downloaded file
+                  if file_path and os.path.exists(file_path):
+                      os.remove(file_path)
                   
-                  # 清理下载的文件
-                  os.remove(file_path)
-                  
-                  print(f"已从 {year_file} 读取 {len(file_ids)} 个ID")
               except Exception as e:
-                  print(f"读取 {year_file} 时出错: {e}")
+                  print(f"检查 {year_file} 时发生严重错误: {e}。将跳过此文件。")
+                  # Attempt cleanup even on error
+                  if file_path and os.path.exists(file_path):
+                      try: os.remove(file_path)
+                      except OSError: pass
           
-          # 去重
-          unique_ids = list(set(all_ids))
-          print(f"Total unique IDs across all files: {len(unique_ids)}")
+          # --- End Efficient Task Checking ---
           
-          # --- Filter tasks: Check for existing embeddings --- 
-          print("开始检查已存在的嵌入...")
-          needed_tasks = []
-          tasks_to_check_by_year = defaultdict(list)
-
-          # Group potential tasks by year file first
-          for id_value in unique_ids:
-              year_file = year_id_map.get(id_value)
-              if year_file:
-                  for model_key in model_keys:
-                      tasks_to_check_by_year[year_file].append({"id": id_value, "model_key": model_key})
-              else:
-                   print(f"警告：未找到ID {id_value} 对应的年份文件（在检查阶段），跳过。")
-
-          processed_year_files = set()
-          for year_file, potential_tasks in tqdm(tasks_to_check_by_year.items(), desc="检查年份文件"):
-               try:
-                   print(f"检查文件: {year_file}")
-                   # Download year file ONCE per year
-                   file_path = hf_hub_download(
-                       repo_id=os.environ['REPO_ID'],
-                       filename=year_file,
-                       repo_type="dataset",
-                       local_dir=".",
-                   )
-                   
-                   # Load dataframe and schema
-                   df_year = pl.read_parquet(file_path)
-                   schema = df_year.schema
-                   print(f"  文件 {year_file} schema: {list(schema.keys())}")
-
-                   # Check tasks for this year
-                   ids_in_file = set(df_year["id"].to_list()) # For quick ID existence check
-                   for task in potential_tasks:
-                       model_key = task["model_key"]
-                       id_value = task["id"]
-
-                       # Basic check: Does the ID exist in this year file?
-                       if id_value not in ids_in_file:
-                            print(f"  警告：ID {id_value} 在文件 {year_file} 中未找到，跳过任务 {model_key}")
-                            continue
-                            
-                       # Check 1: Does the embedding column exist?
-                       if model_key not in schema:
-                           # Column doesn't exist, need to generate
-                           needed_tasks.append({"id": id_value, "year_file": year_file, "model_key": model_key})
-                           # print(f"  需要任务: {id_value} - {model_key} (列不存在)")
-                       else:
-                           # Column exists, check if the value for this ID is null or zero vector
-                           embedding_value = df_year.filter(pl.col("id") == id_value).select(pl.col(model_key)).item()
-                           
-                           # --- Updated Check --- 
-                           is_missing_or_zero = False
-                           if embedding_value is None:
-                               is_missing_or_zero = True
-                               # print(f"  需要任务 (null): {id_value} - {model_key}")
-                           elif isinstance(embedding_value, (list, np.ndarray)): # Check if it's list-like
-                               try:
-                                   # --- Use NumPy allclose for robust near-zero check --- 
-                                   emb_array = np.array(embedding_value, dtype=np.float32)
-                                   # Compare against a zero vector of the same shape
-                                   # Use absolute tolerance (atol), relative tolerance (rtol) is less relevant for comparing to zero.
-                                   if np.allclose(emb_array, 0, atol=1e-7):
-                                   # --- End NumPy allclose check ---
-                                        is_missing_or_zero = True
-                                        # print(f"  需要任务 (near zero): {id_value} - {model_key}")
-                               except Exception as e: # Catch broader errors
-                                   # Handle cases where elements are not comparable to 0.0 or other conversion errors
-                                   print(f"  警告: 检查 {id_value} - {model_key} 的值是否为零向量时出错: {e}。假设不需要处理。")
-                                   pass # Assume it's not a zero vector if check fails
-                           # else: Value exists and is not list-like or not zero, skip task
-                           
-                           if is_missing_or_zero:
-                                needed_tasks.append({"id": id_value, "year_file": year_file, "model_key": model_key})
-                           # --- End Updated Check ---
-                           # else: # Value exists, skip task (covered by the logic above)
-                           #     print(f"  跳过任务: {id_value} - {model_key} (值已存在)")
-
-                   # Clean up downloaded file
-                   os.remove(file_path)
-                   processed_year_files.add(year_file)
-
-               except Exception as e:
-                   print(f"检查 {year_file} 时出错: {e}。将假设该文件所有任务都需要处理。")
-                   # Fallback: If check fails, assume all potential tasks for this year are needed
-                   for task in potential_tasks:
-                        needed_tasks.append({"id": task["id"], "year_file": year_file, "model_key": task["model_key"]})
-                   # Attempt cleanup even on error
-                   if 'file_path' in locals() and os.path.exists(file_path):
-                       try: os.remove(file_path) 
-                       except OSError: pass
-
-          total_potential_tasks = len(unique_ids) * len(model_keys)
           total_needed_tasks = len(needed_tasks)
-          print(f"检查完成。总潜在任务数: {total_potential_tasks}。实际需要处理的任务数: {total_needed_tasks}")
+          print(f"检查完成。总潜在任务数 (估算): {total_potential_tasks}。实际需要处理的任务数: {total_needed_tasks}")
            
           # 根据矩阵数量均匀分配ID
           target_matrix_count = int(os.environ['MATRIX_COUNT'])
-          # limit_per_matrix = 10 # Limit tasks per matrix for testing
-          # print(f"测试模式：每个矩阵最多处理 {limit_per_matrix} 个任务。")
-          
-          # 计算合理的矩阵数量 - 基于需要的任务和限制
           if total_needed_tasks == 0:
                actual_matrix_count = 0 # No tasks, no matrices
                print("警告：没有找到任何需要处理的任务。")
           else:
-              # --- 修改: 不再使用固定 limit_per_matrix ---
-              # Calculate the number of tasks per matrix, aiming for the target_matrix_count
-              # If fewer tasks than matrices, each matrix gets at least one task
               tasks_per_matrix = math.ceil(total_needed_tasks / target_matrix_count)
-              # Ensure at least one task per matrix if there are tasks
-              tasks_per_matrix = max(1, tasks_per_matrix) 
-              
-              # Calculate the actual number of matrices needed based on the calculated tasks_per_matrix
-              # This ensures we don't create empty matrices if tasks_per_matrix is large
+              tasks_per_matrix = max(1, tasks_per_matrix)
               actual_matrix_count = math.ceil(total_needed_tasks / tasks_per_matrix)
-              # Respect the user's requested matrix count as an upper limit, but ensure at least 1 matrix if tasks exist
               actual_matrix_count = min(target_matrix_count, actual_matrix_count)
               actual_matrix_count = max(1, actual_matrix_count)
-              
-              # Recalculate tasks_per_matrix based on the final actual_matrix_count
-              # This distributes tasks as evenly as possible among the *actual* matrices being used.
               tasks_per_matrix = math.ceil(total_needed_tasks / actual_matrix_count)
-
               print(f"总任务数: {total_needed_tasks}。目标矩阵数: {target_matrix_count}。实际使用矩阵数: {actual_matrix_count}。计算得到每个矩阵约处理: {tasks_per_matrix} 个任务。")
-              # --- 修改结束 ---
 
-          task_matrices_for_strategy = [] # Keep this for generating matrix IDs
-          
+          task_matrices_for_strategy = []
           if actual_matrix_count > 0:
-              # Distribute *needed_tasks* among the matrices
-              
-              # 创建任务文件
-              os.makedirs("matrix_tasks", exist_ok=True) # Directory to hold task files
-              
+              os.makedirs("matrix_tasks", exist_ok=True)
               assigned_task_count_total = 0
-              tasks_to_distribute = needed_tasks # Use the filtered list
-              # Shuffle tasks to get a more random sample if desired
-              # import random
-              # random.shuffle(tasks_to_distribute)
+              tasks_to_distribute = needed_tasks
+              import random # Shuffle for potentially better distribution if needed later
+              random.shuffle(tasks_to_distribute)
 
               for i in range(actual_matrix_count):
-                  # --- 修改: 使用计算出的 tasks_per_matrix ---
-                  # Assign tasks to this matrix
                   start_idx = i * tasks_per_matrix
                   end_idx = min(start_idx + tasks_per_matrix, total_needed_tasks)
-                  # --- 修改结束 ---
-                  
-                  # Slice the needed tasks for this matrix
                   matrix_tasks = tasks_to_distribute[start_idx:end_idx]
+                  if not matrix_tasks: # Should not happen with ceil, but safety check
+                       break
 
-                  # Save tasks for this matrix to a JSON file
                   matrix_task_file = f"matrix_tasks/matrix_{i}_tasks.json"
                   with open(matrix_task_file, "w") as f:
                       json.dump(matrix_tasks, f)
                   
                   assigned_task_count_total += len(matrix_tasks)                  
                   print(f"矩阵 {i}: 分配了 {len(matrix_tasks)} 个任务 (从索引 {start_idx} 到 {end_idx-1})，保存到 {matrix_task_file}")
-                  task_matrices_for_strategy.append({"matrix_id": i}) # Add matrix ID for strategy
+                  task_matrices_for_strategy.append({"matrix_id": i})
 
                   # Stop assigning if we've run out of tasks (shouldn't happen with ceil division)
                   if end_idx >= total_needed_tasks:
@@ -313,19 +253,18 @@ jobs:
               print(f"总共分配了 {assigned_task_count_total} 个任务到 {actual_matrix_count} 个矩阵文件中。")
 
           # 输出到GitHub Actions
-          task_matrices_json = json.dumps(task_matrices_for_strategy) # Output list of matrix IDs for strategy
-          matrix_count = actual_matrix_count # Output the actual count used
+          task_matrices_json = json.dumps(task_matrices_for_strategy)
+          matrix_count = actual_matrix_count
 
           with open(os.environ["GITHUB_OUTPUT"], "a") as f:
               f.write(f"task_matrices={task_matrices_json}\n")
               f.write(f"total_tasks={total_needed_tasks}\n")
-              f.write(f"matrix_count={matrix_count}\n") # Add matrix_count output
+              f.write(f"matrix_count={matrix_count}\n")
           
           # 上传任务信息 (optional, for debugging)
           with open("all_tasks_info.json", "w") as f:
               all_tasks_info = {
-                  "total_unique_ids": len(unique_ids),
-                  "total_models": len(model_keys),
+                  "total_potential_tasks": total_potential_tasks, # Note: this is an estimate now
                   "total_tasks": total_needed_tasks,
                   "target_matrices_requested": target_matrix_count,
                   "actual_matrices_created": actual_matrix_count
@@ -564,7 +503,7 @@ jobs:
                       potential_embed_cols = [col for col in df_embed.columns if col != 'id']
 
                       if not potential_embed_cols:
-                          logger.warning(f"No potential embedding columns (other than 'id') found in {embed_file}. Skipping.")
+                          logger.warning(f"No potential embedding columns (other than 'id') found in {embed_file}. Skipping file.")
                           continue
 
                       # Heuristic: Assume the first non-'id' column is the embedding column
