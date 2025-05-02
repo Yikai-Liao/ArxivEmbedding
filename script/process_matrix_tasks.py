@@ -44,15 +44,16 @@ def process_model_year_batch(
     processed_tasks_batch = []
     failed_tasks_batch = []
     ids_to_process = set(task["id"] for task in tasks_for_year_model)
-    log = logger.bind(model_key=model_key, year_file=year_file)
+    # Use the global logger directly, extra context is configured in main
+    # log = logger.bind(model_key=model_key, year_file=year_file)
 
-    log.info(f"Processing {len(ids_to_process)} IDs for model '{model_key}' in file '{year_file}'")
+    logger.info(f"Processing {len(ids_to_process)} IDs for model '{model_key}' in file '{year_file}'") # Use logger
 
     file_path = None
     df_filtered = None
     try:
         # --- Download Year File ---
-        log.info(f"Downloading {year_file}...")
+        logger.info(f"Downloading {year_file}...") # Use logger
         file_path = hf_hub_download(
             repo_id=repo_id,
             filename=year_file,
@@ -60,28 +61,28 @@ def process_model_year_batch(
             local_dir=".", # Download to current dir
             local_dir_use_symlinks=False,
         )
-        log.info(f"Downloaded to {file_path}")
+        logger.info(f"Downloaded to {file_path}") # Use logger
 
         # --- Load and Filter Data ---
-        log.info(f"Loading and filtering {year_file} for {len(ids_to_process)} IDs...")
+        logger.info(f"Loading and filtering {year_file} for {len(ids_to_process)} IDs...") # Use logger
         df_original = pl.read_parquet(file_path)
         df_filtered = df_original.filter(pl.col("id").is_in(ids_to_process))
-        log.info(f"Filtered DataFrame shape: {df_filtered.shape} (Original: {df_original.shape})")
+        logger.info(f"Filtered DataFrame shape: {df_filtered.shape} (Original: {df_original.shape})") # Use logger
 
         if df_filtered.height == 0:
-            log.warning(f"No matching IDs found in {year_file}. Skipping embedding generation.")
+            logger.warning(f"No matching IDs found in {year_file}. Skipping embedding generation.") # Use logger
             # Mark tasks as failed because data wasn't found where expected
             for task in tasks_for_year_model:
                  failed_tasks_batch.append({**task, "error": "ID not found in downloaded year file"})
             return processed_tasks_batch, failed_tasks_batch
 
         # --- Prepare Text ---
-        log.info("Preparing text column...")
+        logger.info("Preparing text column...") # Use logger
         # Ensure required columns exist
         if text_column_title not in df_filtered.columns or text_column_abstract not in df_filtered.columns:
              missing_cols = [col for col in [text_column_title, text_column_abstract] if col not in df_filtered.columns]
              error_msg = f"Missing required text columns {missing_cols} in {year_file}"
-             log.error(error_msg)
+             logger.error(error_msg) # Use logger
              for task in tasks_for_year_model:
                  failed_tasks_batch.append({**task, "error": error_msg})
              return processed_tasks_batch, failed_tasks_batch
@@ -97,11 +98,11 @@ def process_model_year_batch(
             ).alias("_text_to_embed_")
         )
         texts_to_embed = df_filtered["_text_to_embed_"].to_list()
-        log.info(f"Prepared {len(texts_to_embed)} texts for embedding.")
+        logger.info(f"Prepared {len(texts_to_embed)} texts for embedding.") # Use logger
 
         # --- Generate Embeddings ---
         start_time = time.time()
-        log.info(f"Generating embeddings using model '{model_key}' ({model_name_or_path})...")
+        logger.info(f"Generating embeddings using model '{model_key}' ({model_name_or_path})...") # Use logger
         # Assuming generate_embeddings_batch_embed is adapted for direct call
         # It should handle potential errors internally and return list of embeddings (or None/NaN vectors)
         embeddings = generate_embeddings_batch_embed(
@@ -112,26 +113,26 @@ def process_model_year_batch(
             model_key=model_key    # For logging inside the function
         )
         end_time = time.time()
-        log.info(f"Embedding generation took {end_time - start_time:.2f} seconds.")
+        logger.info(f"Embedding generation took {end_time - start_time:.2f} seconds.") # Use logger
 
         if not embeddings or len(embeddings) != df_filtered.height:
             error_msg = f"Embedding generation failed or returned incorrect number of results (expected {df_filtered.height}, got {len(embeddings) if embeddings else 0})."
-            log.error(error_msg)
+            logger.error(error_msg) # Use logger
             # Mark all tasks for this batch as failed
             for task in tasks_for_year_model:
                  failed_tasks_batch.append({**task, "error": error_msg})
             return processed_tasks_batch, failed_tasks_batch
 
         # --- Add Embeddings to DataFrame ---
-        log.info(f"Adding embeddings column '{model_key}'...")
+        logger.info(f"Adding embeddings column '{model_key}'...") # Use logger
         embedding_series = pl.Series(name=model_key, values=embeddings, dtype=pl.List(pl.Float32))
         df_output = df_filtered.select(["id"]).with_columns(embedding_series) # Select only id and the new embedding column
 
         # --- Save Result ---
         output_filename = output_dir / f"embedded-{year_file}-{model_key}.parquet"
-        log.info(f"Saving results to {output_filename}...")
+        logger.info(f"Saving results to {output_filename}...") # Use logger
         df_output.write_parquet(output_filename, compression='zstd')
-        log.info("Results saved successfully.")
+        logger.info("Results saved successfully.") # Use logger
 
         # Mark tasks as processed
         for task in tasks_for_year_model:
@@ -139,13 +140,13 @@ def process_model_year_batch(
              if task["id"] in df_output["id"].to_list():
                  processed_tasks_batch.append({**task, "output_file": str(output_filename)})
              else:
-                 log.warning(f"ID {task['id']} was expected but not found in the final output for {output_filename}. Marking as failed.")
+                 logger.warning(f"ID {task['id']} was expected but not found in the final output for {output_filename}. Marking as failed.") # Use logger
                  failed_tasks_batch.append({**task, "error": "ID missing in final embedding output"})
 
 
     except Exception as e:
         error_msg = f"Error processing batch for model '{model_key}', year '{year_file}': {e}"
-        log.error(error_msg, exc_info=True)
+        logger.error(error_msg, exc_info=True) # Use logger
         # Mark all tasks intended for this batch as failed
         for task in tasks_for_year_model:
              failed_tasks_batch.append({**task, "error": error_msg})
@@ -155,9 +156,9 @@ def process_model_year_batch(
         if file_path and os.path.exists(file_path):
             try:
                 os.remove(file_path)
-                log.debug(f"Cleaned up downloaded file: {file_path}")
+                logger.debug(f"Cleaned up downloaded file: {file_path}") # Use logger
             except OSError as e:
-                log.warning(f"Could not remove downloaded file {file_path}: {e}")
+                logger.warning(f"Could not remove downloaded file {file_path}: {e}") # Use logger
 
     return processed_tasks_batch, failed_tasks_batch
 
@@ -177,15 +178,15 @@ def main():
 
     args = parser.parse_args()
 
-    # Bind matrix_id to logger context for all subsequent logs
-    log = logger.bind(matrix_id=args.matrix_id)
+    # Configure the logger to include matrix_id in the extra dict for all logs
+    logger.configure(extra={"matrix_id": args.matrix_id})
 
-    log.info(f"Starting processing for Matrix ID: {args.matrix_id}")
-    log.info(f"Task File: {args.task_file}")
-    log.info(f"Output Directory: {args.output_dir}")
-    log.info(f"Config File: {args.config_file}")
-    log.info(f"Repo ID: {args.repo_id}")
-    log.info(f"Device: {args.device}, Engine: {args.engine}, Batch Size: {args.batch_size}")
+    logger.info(f"Starting processing for Matrix ID: {args.matrix_id}")
+    logger.info(f"Task File: {args.task_file}")
+    logger.info(f"Output Directory: {args.output_dir}")
+    logger.info(f"Config File: {args.config_file}")
+    logger.info(f"Repo ID: {args.repo_id}")
+    logger.info(f"Device: {args.device}, Engine: {args.engine}, Batch Size: {args.batch_size}")
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(exist_ok=True)
@@ -194,16 +195,16 @@ def main():
     try:
         with open(args.task_file, 'r') as f:
             tasks = json.load(f)
-        log.info(f"Loaded {len(tasks)} tasks from {args.task_file}")
+        logger.info(f"Loaded {len(tasks)} tasks from {args.task_file}")
         if not tasks:
-            log.warning("Task file is empty. No processing needed.")
+            logger.warning("Task file is empty. No processing needed.")
             # Create empty summary files
             with open(output_dir / "processed_tasks.json", "w") as f: json.dump([], f)
             with open(output_dir / "failed_tasks.json", "w") as f: json.dump([], f)
             with open(output_dir / "summary.txt", "w") as f: f.write(f"Matrix {args.matrix_id} Summary\nNo tasks found.\n")
             return 0
     except Exception as e:
-        log.error(f"Failed to load tasks from {args.task_file}: {e}")
+        logger.error(f"Failed to load tasks from {args.task_file}: {e}")
         # Cannot proceed without tasks
         return 1
 
@@ -217,7 +218,7 @@ def main():
         tasks_by_model_then_year[model_key][year_file].append(task)
         all_model_keys.add(model_key)
 
-    log.info(f"Tasks grouped into {len(tasks_by_model_then_year)} models.")
+    logger.info(f"Tasks grouped into {len(tasks_by_model_then_year)} models.")
 
     # --- Load Config ---
     try:
@@ -229,31 +230,32 @@ def main():
              if model_info:
                  model_configs[key] = model_info
              else:
-                 log.error(f"Model key '{key}' not found or missing 'model_name' in config file '{args.config_file}'.")
+                 logger.error(f"Model key '{key}' not found or missing 'model_name' in config file '{args.config_file}'.")
                  # Decide how to handle: fail matrix or skip model? Let's skip model for now.
     except Exception as e:
-        log.error(f"Error loading or parsing config file {args.config_file}: {e}")
+        logger.error(f"Error loading or parsing config file {args.config_file}: {e}")
         return 1 # Config is essential
 
     # --- Determine Device ---
     device = args.device
     if device == "cuda" and not torch.cuda.is_available():
-        log.warning("CUDA specified but not available. Falling back to CPU.")
+        logger.warning("CUDA specified but not available. Falling back to CPU.")
         device = "cpu"
     elif device not in ["cuda", "cpu"]:
-        log.warning(f"Invalid device '{device}'. Falling back to CPU.")
+        logger.warning(f"Invalid device '{device}'. Falling back to CPU.")
         device = "cpu"
-    log.info(f"Final device selection: {device}")
+    logger.info(f"Final device selection: {device}")
 
     processed_tasks_all = []
     failed_tasks_all = []
 
     # --- Process by Model ---
     for model_key, tasks_by_year in tqdm(tasks_by_model_then_year.items(), desc="Processing Models"):
-        log_model = log.bind(model_key=model_key) # Bind model_key for this loop
+        # Use the global logger directly, extra context is configured in main
+        # log_model = log.bind(model_key=model_key) # Bind model_key for this loop
 
         if model_key not in model_configs:
-            log_model.error(f"Skipping model '{model_key}' due to missing configuration.")
+            logger.error(f"Skipping model '{model_key}' due to missing configuration.") # Use logger
             # Mark all tasks for this model as failed
             for year_file, year_tasks in tasks_by_year.items():
                 for task in year_tasks:
@@ -261,7 +263,7 @@ def main():
             continue
 
         model_name_or_path = model_configs[model_key]["model_name"]
-        log_model.info(f"Initializing model '{model_key}' ({model_name_or_path}) on {device} using {args.engine} engine...")
+        logger.info(f"Initializing model '{model_key}' ({model_name_or_path}) on {device} using {args.engine} engine...") # Use logger
 
         register = None
         try:
@@ -272,7 +274,7 @@ def main():
                 device=device,
                 # Consider passing batch_size from args if needed by BatchedInference init
             )
-            log_model.info("BatchedInference initialized successfully.")
+            logger.info("BatchedInference initialized successfully.") # Use logger
 
             # Process year files for this model
             for year_file, tasks_for_year_model in tqdm(tasks_by_year.items(), desc=f"Years for {model_key}", leave=False):
@@ -292,7 +294,7 @@ def main():
                 failed_tasks_all.extend(failed_batch)
 
         except Exception as e:
-            log_model.error(f"Failed to initialize or run BatchedInference for model '{model_key}': {e}", exc_info=True)
+            logger.error(f"Failed to initialize or run BatchedInference for model '{model_key}': {e}", exc_info=True) # Use logger
             # Mark all remaining tasks for this model as failed
             for year_file, year_tasks in tasks_by_year.items():
                 # Avoid double-adding if some years were already processed and failed
@@ -304,12 +306,12 @@ def main():
         finally:
             # Stop BatchedInference instance for the model
             if register:
-                log_model.info("Stopping BatchedInference...")
+                logger.info("Stopping BatchedInference...") # Use logger
                 try:
                     register.stop()
-                    log_model.info("BatchedInference stopped.")
+                    logger.info("BatchedInference stopped.") # Use logger
                 except Exception as e:
-                    log_model.error(f"Error stopping BatchedInference: {e}")
+                    logger.error(f"Error stopping BatchedInference: {e}") # Use logger
 
     # --- Final Summary ---
     total_attempted = len(tasks)
@@ -317,10 +319,10 @@ def main():
     total_failed = len(failed_tasks_all)
     success_percent = (total_processed / total_attempted * 100) if total_attempted > 0 else 0
 
-    log.info(f"Matrix processing finished. Attempted: {total_attempted}, Succeeded: {total_processed}, Failed: {total_failed} ({success_percent:.1f}%)")
+    logger.info(f"Matrix processing finished. Attempted: {total_attempted}, Succeeded: {total_processed}, Failed: {total_failed} ({success_percent:.1f}%)") # Use logger
 
     # Save summary files
-    log.info("Saving summary files...")
+    logger.info("Saving summary files...") # Use logger
     try:
         with open(output_dir / "processed_tasks.json", "w") as f:
             json.dump(processed_tasks_all, f, indent=2)
@@ -348,9 +350,9 @@ def main():
                 for i, task in enumerate(failed_tasks_all[:10]):
                     f.write(f"{i+1}. ID: {task.get('id')}, Model: {task.get('model_key')}, File: {task.get('year_file')}, Error: {task.get('error', 'N/A')}\n")
     except Exception as e:
-        log.error(f"Failed to write summary files: {e}")
+        logger.error(f"Failed to write summary files: {e}") # Use logger
 
-    log.info("--- Matrix Processing Script Finished ---")
+    logger.info("--- Matrix Processing Script Finished ---") # Use logger
 
     # Return non-zero exit code if there were failures
     return 1 if total_failed > 0 else 0

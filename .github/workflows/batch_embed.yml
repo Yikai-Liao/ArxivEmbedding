@@ -30,19 +30,6 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: Get pip cache dir
-        id: pip-cache
-        run: |
-          echo "dir=$(pip cache dir)" >> $GITHUB_OUTPUT
-
-      - name: Cache pip dependencies
-        uses: actions/cache@v4
-        with:
-          path: ${{ steps.pip-cache.outputs.dir }}
-          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
-
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
@@ -273,8 +260,7 @@ jobs:
     strategy:
       fail-fast: false # Continue other jobs even if one fails
       matrix:
-        # Use the generated list of matrix IDs
-        matrix_info: ${{ fromJson(needs.list_files_and_create_tasks.outputs.task_matrices) }} 
+        matrix_info: ${{ fromJson(needs.list_files_and_create_tasks.outputs.task_matrices) }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -283,6 +269,19 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
+
+      - name: Get pip cache dir
+        id: pip-cache
+        run: |
+          echo "dir=$(pip cache dir)" >> $GITHUB_OUTPUT
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.pip-cache.outputs.dir }}
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
 
       - name: Install dependencies
         run: |
