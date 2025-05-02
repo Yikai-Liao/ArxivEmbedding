@@ -8,3 +8,6 @@ feedparser
 datasets
 huggingface_hub
 pyarrow
+embed
+torch
+transformers
