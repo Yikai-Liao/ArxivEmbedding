@@ -139,8 +139,8 @@ jobs:
                            # --- DEBUGGING START --- 
                            # Calculate counts for each condition separately
                            null_count = df_year.filter(is_null_expr).height
-                           # Only check near-zero for non-null rows of the correct type
-                           near_zero_count = df_year.filter(is_near_zero_expr & (~is_null_expr) & is_list_or_array_expr).height
+                           # Only check near-zero for non-null rows. The is_near_zero_expr handles type internally.
+                           near_zero_count = df_year.filter(is_near_zero_expr & (~is_null_expr)).height
                            print(f"    调试: 模型 '{model_key}' - Null count: {null_count}")
                            print(f"    调试: 模型 '{model_key}' - Near-zero count (checked on non-null list/array): {near_zero_count}")
                            # --- DEBUGGING END --- 
