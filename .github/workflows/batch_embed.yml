@@ -70,7 +70,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: task-summary-info
-          path: all_tasks_info.json
+          path: matrix_tasks/all_tasks_info.json
           retention-days: 1
 
   process_task_matrix:
