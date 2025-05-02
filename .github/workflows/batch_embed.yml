@@ -52,7 +52,7 @@ jobs:
           mkdir -p $OUTPUT_DIR
           
           # Execute the script on a single line to avoid backslash issues
-          python script/local_split_tasks.py --repo-id "$REPO_ID" --matrix-count "$MATRIX_COUNT" --years "$TARGET_YEARS" --config-file "$CONFIG_FILE" --output-dir "$OUTPUT_DIR" --max-tasks-per-matrix 10
+          python script/local_split_tasks.py --repo-id "$REPO_ID" --matrix-count "$MATRIX_COUNT" --years "$TARGET_YEARS" --config-file "$CONFIG_FILE" --output-dir "$OUTPUT_DIR"
             
           # Script's stdout/stderr will still be printed for logging.
           # No need for manual parsing or setting outputs here anymore.
@@ -146,7 +146,7 @@ jobs:
           echo "Output Directory: $OUTPUT_DIR"
 
           # Run the script on a single line
-          python script/process_matrix_tasks.py --matrix-id $MATRIX_ID --task-file $TASK_FILE --output-dir $OUTPUT_DIR --config-file config.toml --repo-id $REPO_ID --batch-size 4 --engine torch --device cpu
+          python script/process_matrix_tasks.py --matrix-id $MATRIX_ID --task-file $TASK_FILE --output-dir $OUTPUT_DIR --config-file config.toml --repo-id $REPO_ID --batch-size 16 --engine torch --device cpu
 
       - name: Upload matrix output artifacts
         uses: actions/upload-artifact@v4
