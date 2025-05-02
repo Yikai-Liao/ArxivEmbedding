@@ -8,6 +8,11 @@ on:
         required: false
         type: string
         default: ''
+      matrix_count:
+        description: '要创建的并行矩阵数量 (推荐: 10-40)'
+        required: false
+        type: number
+        default: 20
 
 jobs:
   list_files_and_create_tasks:
@@ -34,7 +39,7 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HUGGINGFACE_TOKEN }} # Needs repo write access
           REPO_ID: lyk/ArxivEmbedding # Your dataset ID
-          MATRIX_COUNT: 40 # Target number of matrices for balanced parallelism
+          MATRIX_COUNT: ${{ github.event.inputs.matrix_count || 20 }} # 使用输入参数设置矩阵数量，默认20
           TARGET_YEARS: ${{ github.event.inputs.years }}
         run: |
           import os
@@ -66,10 +71,39 @@ jobs:
           # List models from config
           config = toml.load("config.toml")
           embedding_configs = {}
-          for section in config.get("Embedding", []):
+          # 修复模型配置解析
+          for section in config.get("Embedding", {}):
               for k, v in section.items():
                   embedding_configs[k] = v
+          
+          # 如果embedding_configs为空，检查config.toml的结构
+          if not embedding_configs:
+              print("WARNING: 没有从config.toml中找到有效的Embedding配置。检查config.toml内容:")
+              print(config)
+              
+              # 尝试使用替代方法读取Embedding部分
+              if "Embedding" in config:
+                  embedding_section = config["Embedding"]
+                  print(f"检测到Embedding部分: {embedding_section}")
+                  
+                  # 如果Embedding是列表(例如TOML中使用[[jasper_v1]])
+                  if isinstance(embedding_section, list):
+                      for item in embedding_section:
+                          for k, v in item.items():
+                              embedding_configs[k] = v
+                  # 如果Embedding是字典(例如TOML中使用[Embedding.jasper_v1])
+                  elif isinstance(embedding_section, dict):
+                      for k, v in embedding_section.items():
+                          embedding_configs[k] = v
+          
           model_keys = list(embedding_configs.keys())
+          
+          # 如果模型列表仍然为空，不使用硬编码备用模型
+          if not model_keys:
+              print("ERROR: 无法从config.toml中读取模型配置，请检查配置文件格式")
+              # 不继续执行，以避免使用硬编码的模型
+              sys.exit(1)
+          
           print(f"Found model keys: {model_keys}")
 
           # Create all possible task combinations
@@ -220,7 +254,7 @@ jobs:
                       "--output-file", str(output_file),
                       "--model-key", model_key,
                       "--config-file", "config.toml",
-                      "--batch-size", "64",
+                      "--batch-size", "2",
                       "--engine", "torch",
                       "--device", "cpu"  # Change to cuda if running on GPU
                   ]

@@ -9,6 +9,7 @@ from tqdm import tqdm
 from loguru import logger # Import loguru
 from collections.abc import Iterable
 import sys # Import sys for logger setup
+from datetime import datetime  # 添加 datetime 导入以获取当前日期
 
 # --- Global Variables (Defaults, will be overridden by config) ---
 OAI_CONFIG = {
@@ -112,7 +113,21 @@ def fetch_records(year, category=None, resumption_token=None):
     else:
         params["metadataPrefix"] = OAI_CONFIG["metadata_prefix"]
         params["from"] = f"{year}-01-01"
-        params["until"] = f"{year}-12-31"
+        
+        # 检查请求的年份是否为当前年份，如果是则使用当前日期作为结束日期
+        current_date = datetime.now()
+        current_year = current_date.year
+        
+        if year == current_year:
+            # 对于当前年份，将 until 参数设置为当前日期
+            until_date = current_date.strftime("%Y-%m-%d")
+            logger.info(f"Requesting current year data. Setting until date to today: {until_date}")
+        else:
+            # 对于过去的年份，使用年末日期
+            until_date = f"{year}-12-31"
+        
+        params["until"] = until_date
+        
         if category:
             # Format the category correctly for the 'set' parameter
             set_spec = format_category_for_oai(category)
@@ -326,6 +341,4 @@ def main():
     return 0
 
 if __name__ == "__main__":
-    import sys
     sys.exit(main())
-
