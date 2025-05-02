@@ -88,34 +88,27 @@ def generate_embeddings_batch_embed(register: BatchedInference, model_id: str, t
     processing_chunk_size = batch_size # Use provided batch_size for chunking
     logger.info(f"Using processing chunk size: {processing_chunk_size} for queuing tasks.")
 
-    futures = []
-    try:
-        for i in tqdm(range(0, total_texts, processing_chunk_size), desc=f"Queueing Embeddings ({model_key})", leave=False):
+    processed_count = 0
+    # Process chunk by chunk, waiting for each chunk to complete
+    with tqdm(total=total_texts, desc=f"Processing Embeddings ({model_key})", leave=False) as pbar:
+        for i in range(0, total_texts, processing_chunk_size):
             batch_texts = texts[i : i + processing_chunk_size]
             if not batch_texts:
                 continue
-            # Queue the embedding task, returns a Future
-            future = register.embed(sentences=batch_texts, model_id=model_id)
-            futures.append((future, len(batch_texts))) # Store future and expected count
-    except Exception as e:
-        logger.error(f"Error occurred during embedding task queuing: {e}", exc_info=True)
-        # Indicate critical failure by returning None
-        return None
 
-    logger.info(f"Queued {len(futures)} embedding tasks. Waiting for results...")
-
-    # Wait for results and collect them
-    processed_count = 0
-    with tqdm(total=total_texts, desc=f"Processing Embeddings ({model_key})", leave=False) as pbar:
-        for future, count in futures:
+            count = len(batch_texts)
             try:
-                # future.result() blocks until the result is ready
+                # 1. Queue the embedding task for the current chunk
+                future = register.embed(sentences=batch_texts, model_id=model_id)
+
+                # 2. Immediately wait for the result of this chunk
                 batch_embeddings_list, token_usage = future.result()
+
                 # Ensure embeddings are float32 numpy arrays
                 batch_embeddings_np = [np.array(emb, dtype=np.float32) for emb in batch_embeddings_list]
 
                 if len(batch_embeddings_np) != count:
-                    logger.warning(f"Mismatch in expected ({count}) vs received ({len(batch_embeddings_np)}) embeddings for a batch. Padding with NaNs.")
+                    logger.warning(f"Mismatch in expected ({count}) vs received ({len(batch_embeddings_np)}) embeddings for batch starting at index {i}. Padding with NaNs.")
                     # Pad with NaN vectors if necessary
                     if batch_embeddings_np:
                         embedding_dim = batch_embeddings_np[0].shape[0]
