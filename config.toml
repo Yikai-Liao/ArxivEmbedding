@@ -13,10 +13,10 @@ max_retries = 5
 batch_size = 1000
 
 [Embedding]
-[[jasper_v1]]
+[Embedding.jasper_v1]
 model_name = "NovaSearch/jasper_en_vision_language_v1"
 
-[[conan_v1]]
+[Embedding.conan_v1]
 model_name = "TencentBAC/Conan-embedding-v1"
 
 
