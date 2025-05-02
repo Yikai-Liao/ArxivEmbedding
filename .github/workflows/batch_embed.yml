@@ -324,7 +324,7 @@ jobs:
             --output-dir $OUTPUT_DIR \
             --config-file config.toml \
             --repo-id $REPO_ID \
-            --batch-size 64 \
+            --batch-size 1 \
             --engine torch \
             --device cpu # Use "cuda" for GPU
 
