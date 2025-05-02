@@ -59,7 +59,7 @@ jobs:
           echo "Task splitting script finished. Outputs should be set directly."
 
       - name: Upload individual task files
-        if: steps.list_files.outputs.matrix_count > 0 # Only upload if matrices were created
+        if: steps.list_files.outputs.matrix_count != '0' # Use string comparison
         uses: actions/upload-artifact@v4
         with:
           name: matrix-tasks # A single artifact containing all task files
@@ -73,9 +73,16 @@ jobs:
           path: matrix_tasks/all_tasks_info.json
           retention-days: 1
 
+      - name: Debug Outputs
+        if: always() # Ensure this runs even if previous steps failed slightly
+        run: |
+          echo "Debug: total_tasks = ${{ steps.list_files.outputs.total_tasks }}"
+          echo "Debug: matrix_count = ${{ steps.list_files.outputs.matrix_count }}"
+          echo "Debug: task_matrices = ${{ steps.list_files.outputs.task_matrices }}"
+
   process_task_matrix:
     needs: list_files_and_create_tasks
-    if: needs.list_files_and_create_tasks.outputs.matrix_count > 0 # Only run if matrices exist
+    if: needs.list_files_and_create_tasks.outputs.matrix_count != '0' # Use string comparison
     runs-on: ubuntu-latest # Consider GPU runners if available: ubuntu-latest-gpu
     strategy:
       fail-fast: false # Continue other jobs even if one fails

@@ -281,12 +281,15 @@ def run_task_splitting(args):
         if github_output_file:
              # Ensure task_matrices is valid JSON (it should be)
              task_matrices_json = json.dumps(task_matrices_for_strategy)
+             delimiter = "ghadelimiter_" + os.urandom(16).hex() # Use a random delimiter
              with open(github_output_file, 'a') as f: # Append to the output file
-                 f.write(f"total_tasks={total_assigned_tasks}\\n")
-                 f.write(f"matrix_count={actual_matrix_count}\\n")
-                 # Make sure the JSON string doesn't contain newlines that break the format
-                 f.write(f"task_matrices={task_matrices_json}\\n") 
-             print("::debug::Successfully wrote outputs to GITHUB_OUTPUT file.")
+                 f.write(f"total_tasks={total_assigned_tasks}\n")
+                 f.write(f"matrix_count={actual_matrix_count}\n")
+                 # Use delimiter method for task_matrices JSON string
+                 f.write(f"task_matrices<<{delimiter}\n")
+                 f.write(f"{task_matrices_json}\n")
+                 f.write(f"{delimiter}\n")
+             print("::debug::Successfully wrote outputs to GITHUB_OUTPUT file using delimiter method.")
         else:
              print("::error::GITHUB_OUTPUT environment variable not found, cannot set outputs for Actions.")
              sys.exit(1) # Exit with error if we are in Actions but cannot set output
