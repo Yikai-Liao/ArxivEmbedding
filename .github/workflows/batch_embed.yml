@@ -1,0 +1,426 @@
+name: Batch Generate Embeddings for Historical Data
+
+on:
+  workflow_dispatch: # Manual trigger
+    inputs:
+      years:
+        description: '要处理的年份列表 (例如: 2018,2019,2020)，留空表示处理所有年份'
+        required: false
+        type: string
+        default: ''
+
+jobs:
+  list_files_and_create_tasks:
+    runs-on: ubuntu-latest
+    outputs:
+      task_matrices: ${{ steps.create_task_matrices.outputs.task_matrices }}
+      total_tasks: ${{ steps.create_task_matrices.outputs.total_tasks }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: List Parquet files, Models and Create Task Matrices
+        id: create_task_matrices
+        env:
+          HF_TOKEN: ${{ secrets.HUGGINGFACE_TOKEN }} # Needs repo write access
+          REPO_ID: lyk/ArxivEmbedding # Your dataset ID
+          MATRIX_COUNT: 40 # Target number of matrices for balanced parallelism
+          TARGET_YEARS: ${{ github.event.inputs.years }}
+        run: |
+          import os
+          from huggingface_hub import HfApi
+          import toml
+          import json
+          import math
+
+          # 获取需要处理的年份列表（如果有指定）
+          target_years_input = os.environ.get('TARGET_YEARS', '').strip()
+          target_years = []
+          if target_years_input:
+              target_years = [year.strip() for year in target_years_input.split(',')]
+              print(f"用户指定处理的年份: {target_years}")
+
+          # List files from Hub
+          api = HfApi()
+          repo_files = api.list_repo_files(repo_id=os.environ['REPO_ID'], repo_type='dataset')
+          # Filter for YYYY.parquet files (e.g., 2018.parquet, 2024.parquet)
+          # Exclude current.parquet and non-parquet files
+          year_files = [f for f in repo_files if f.endswith('.parquet') and f[:-len('.parquet')].isdigit()]
+          
+          # 如果指定了年份，只处理那些年份
+          if target_years:
+              year_files = [f for f in year_files if any(year in f for year in target_years)]
+              
+          print(f"Found yearly files to process: {year_files}")
+
+          # List models from config
+          config = toml.load("config.toml")
+          embedding_configs = {}
+          for section in config.get("Embedding", []):
+              for k, v in section.items():
+                  embedding_configs[k] = v
+          model_keys = list(embedding_configs.keys())
+          print(f"Found model keys: {model_keys}")
+
+          # Create all possible task combinations
+          all_tasks = []
+          for year_file in year_files:
+              for model_key in model_keys:
+                  all_tasks.append({"year_file": year_file, "model_key": model_key})
+          
+          total_tasks = len(all_tasks)
+          print(f"Total tasks to process: {total_tasks}")
+          
+          # Create balanced task matrices
+          target_matrix_count = int(os.environ['MATRIX_COUNT'])
+          # Adjust if we have fewer tasks than requested matrices
+          actual_matrix_count = min(target_matrix_count, total_tasks)
+          
+          # Calculate tasks per matrix (rounded up to ensure all tasks are assigned)
+          tasks_per_matrix = math.ceil(total_tasks / actual_matrix_count)
+          
+          # Distribute tasks across matrices
+          task_matrices = []
+          for i in range(actual_matrix_count):
+              start_idx = i * tasks_per_matrix
+              end_idx = min((i + 1) * tasks_per_matrix, total_tasks)
+              if start_idx < total_tasks:  # Only add non-empty matrices
+                  matrix_tasks = all_tasks[start_idx:end_idx]
+                  task_matrices.append({
+                      "matrix_id": i,
+                      "tasks": matrix_tasks
+                  })
+          
+          # Check if we got a reasonable distribution
+          actual_matrices = len(task_matrices)
+          print(f"Created {actual_matrices} matrices with approximately {tasks_per_matrix} tasks each")
+          
+          # Save task matrices to temporary file to be used by workers
+          with open("task_matrices.json", "w") as f:
+              json.dump(task_matrices, f)
+          
+          # Output for GitHub Actions
+          task_matrices_json = json.dumps(task_matrices)
+          print(f"::set-output name=task_matrices::{task_matrices_json}")
+          print(f"::set-output name=total_tasks::{total_tasks}")
+          
+          # Upload task matrices as artifact for reference
+          with open("all_tasks.json", "w") as f:
+              json.dump(all_tasks, f)
+        shell: python # Use python shell directly
+          
+      - name: Upload task definitions
+        uses: actions/upload-artifact@v4
+        with:
+          name: task-definitions
+          path: |
+            task_matrices.json
+            all_tasks.json
+
+  process_task_matrix:
+    needs: list_files_and_create_tasks
+    runs-on: ubuntu-latest # Consider GPU runners if available: ubuntu-latest-gpu
+    strategy:
+      fail-fast: false # Continue other jobs even if one fails
+      matrix:
+        matrix_id: ${{ fromJson(needs.list_files_and_create_tasks.outputs.task_matrices) }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # Install base requirements + embedding libs
+          pip install -r requirements.txt
+          pip install embed torch toml tqdm loguru huggingface_hub
+          # Add accelerate if using multi-gpu or specific optimizations
+          # pip install accelerate
+          # Add GPU specific libraries if using GPU runner
+          # pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118 # Example for CUDA 11.8
+
+      - name: Process Tasks in Matrix
+        id: process_tasks
+        env:
+          HF_TOKEN: ${{ secrets.HUGGINGFACE_TOKEN }}
+          REPO_ID: lyk/ArxivEmbedding
+          MATRIX_ID: ${{ matrix.matrix_id.matrix_id }}
+          MATRIX_TASKS: ${{ toJson(matrix.matrix_id.tasks) }}
+        run: |
+          import os
+          import json
+          import subprocess
+          import sys
+          from pathlib import Path
+          from huggingface_hub import hf_hub_download
+          from tqdm import tqdm
+          from loguru import logger
+          
+          logger.remove()
+          logger.add(sys.stderr, level="INFO", format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <level>{message}</level>")
+
+          # Parse the tasks assigned to this matrix
+          matrix_id = int(os.environ["MATRIX_ID"])
+          tasks = json.loads(os.environ["MATRIX_TASKS"])
+          
+          logger.info(f"Matrix {matrix_id} processing {len(tasks)} tasks")
+          
+          processed_tasks = []
+          failed_tasks = []
+          
+          # Create output directory for this matrix
+          output_dir = Path(f"matrix_output_{matrix_id}")
+          output_dir.mkdir(exist_ok=True)
+          
+          # Process each task
+          for task_idx, task in enumerate(tqdm(tasks, desc=f"Matrix {matrix_id} Tasks")):
+              year_file = task["year_file"]
+              model_key = task["model_key"]
+              
+              logger.info(f"Processing task {task_idx+1}/{len(tasks)}: {year_file} with model {model_key}")
+              
+              # Download the year file
+              try:
+                  input_file_path = hf_hub_download(
+                      repo_id=os.environ["REPO_ID"],
+                      filename=year_file,
+                      repo_type="dataset",
+                      local_dir=".",
+                      local_dir_use_symlinks=False
+                  )
+                  logger.info(f"Downloaded {year_file} to {input_file_path}")
+              except Exception as e:
+                  logger.error(f"Failed to download {year_file}: {e}")
+                  failed_tasks.append({"year_file": year_file, "model_key": model_key, "error": f"Download failed: {str(e)}"})
+                  continue
+                  
+              # Output file for this specific task
+              output_file = output_dir / f"embedded-{year_file}-{model_key}.parquet"
+              
+              # Run embedding generation
+              try:
+                  cmd = [
+                      "python", "script/generate_embeddings.py",
+                      "--input-file", input_file_path,
+                      "--output-file", str(output_file),
+                      "--model-key", model_key,
+                      "--config-file", "config.toml",
+                      "--batch-size", "64",
+                      "--engine", "torch",
+                      "--device", "cpu"  # Change to cuda if running on GPU
+                  ]
+                  
+                  logger.info(f"Running command: {' '.join(cmd)}")
+                  process = subprocess.run(cmd, check=True, capture_output=True, text=True)
+                  
+                  if process.returncode == 0:
+                      logger.info(f"Successfully generated embeddings for {year_file} with model {model_key}")
+                      processed_tasks.append({"year_file": year_file, "model_key": model_key, "output_file": str(output_file)})
+                  else:
+                      logger.error(f"Command failed with return code {process.returncode}")
+                      logger.error(f"STDOUT: {process.stdout}")
+                      logger.error(f"STDERR: {process.stderr}")
+                      failed_tasks.append({"year_file": year_file, "model_key": model_key, "error": f"Process error: {process.stderr}"})
+              
+              except Exception as e:
+                  logger.error(f"Error running embedding generation: {e}")
+                  failed_tasks.append({"year_file": year_file, "model_key": model_key, "error": str(e)})
+              
+              # Clean up downloaded file after processing
+              try:
+                  if os.path.exists(input_file_path):
+                      os.remove(input_file_path)
+              except Exception as e:
+                  logger.warning(f"Could not remove downloaded file {input_file_path}: {e}")
+          
+          # Write results as JSON for the artifact
+          with open(output_dir / "processed_tasks.json", "w") as f:
+              json.dump(processed_tasks, f, indent=2)
+              
+          with open(output_dir / "failed_tasks.json", "w") as f:
+              json.dump(failed_tasks, f, indent=2)
+              
+          # Summary
+          logger.info(f"Matrix {matrix_id} completed. Processed: {len(processed_tasks)}, Failed: {len(failed_tasks)}")
+          
+          # Create a summary file for easy viewing
+          with open(output_dir / "summary.txt", "w") as f:
+              f.write(f"Matrix {matrix_id} Summary\n")
+              f.write(f"==================\n")
+              f.write(f"Total tasks: {len(tasks)}\n")
+              f.write(f"Successful: {len(processed_tasks)}\n")
+              f.write(f"Failed: {len(failed_tasks)}\n\n")
+              
+              if failed_tasks:
+                  f.write("Failed Tasks:\n")
+                  for idx, task in enumerate(failed_tasks):
+                      f.write(f"{idx+1}. {task['year_file']} - {task['model_key']}: {task['error']}\n")
+        shell: python
+
+      - name: Upload matrix output artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: matrix-output-${{ matrix.matrix_id.matrix_id }}
+          path: matrix_output_${{ matrix.matrix_id.matrix_id }}
+          retention-days: 5 # Keep artifacts for 5 days
+
+  merge_and_upload:
+    needs: [list_files_and_create_tasks, process_task_matrix]
+    runs-on: ubuntu-latest
+    # This job runs once after all matrix jobs are done
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install polars huggingface_hub tqdm loguru
+
+      - name: Download all matrix output artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts # Download all artifacts into 'artifacts' directory
+          
+      - name: Collect and organize all embedding outputs
+        run: |
+          # Create a directory to collect all embedded files
+          mkdir -p all_embedded_files
+          
+          # Find all embedded-*.parquet files across all matrix outputs
+          find artifacts/matrix-output-* -name "embedded-*.parquet" -exec cp {} all_embedded_files/ \;
+          
+          # List what we found
+          echo "Found the following embedded files:"
+          ls -la all_embedded_files/
+
+      - name: Merge Embeddings and Upload
+        env:
+          HF_TOKEN: ${{ secrets.HUGGINGFACE_TOKEN }}
+          REPO_ID: lyk/ArxivEmbedding
+        run: |
+          import os
+          import glob
+          import polars as pl
+          from huggingface_hub import HfApi, hf_hub_download, upload_file
+          from tqdm import tqdm
+          from loguru import logger
+          import re
+
+          repo_id = os.environ['REPO_ID']
+          api = HfApi()
+
+          # Identify unique year files from the embedded file patterns
+          embedded_files = glob.glob("all_embedded_files/embedded-*.parquet")
+          year_files_to_process = set()
+          
+          # Extract year from filenames like embedded-2020.parquet-model_key.parquet
+          for file_path in embedded_files:
+              filename = os.path.basename(file_path)
+              # Extract the original year file name
+              match = re.search(r'embedded-([0-9]+\.parquet)', filename)
+              if match:
+                  year_file = match.group(1)
+                  year_files_to_process.add(year_file)
+
+          logger.info(f"Found year files to process: {year_files_to_process}")
+
+          for year_file in tqdm(list(year_files_to_process), desc="Merging and Uploading Years"):
+              logger.info(f"--- Processing {year_file} ---")
+              local_final_path = f"final_{year_file}"
+              
+              # Find all embedding files for this year
+              embedding_files = [f for f in embedded_files if f"embedded-{year_file}-" in os.path.basename(f)]
+              
+              if not embedding_files:
+                  logger.warning(f"No embedding artifacts found for {year_file}. Skipping.")
+                  continue
+
+              # Download the original file from the Hub to merge into
+              try:
+                  logger.info(f"Downloading original {year_file} from Hub...")
+                  original_file_path = hf_hub_download(repo_id=repo_id, filename=year_file, repo_type='dataset', local_dir='.', local_dir_use_symlinks=False)
+                  logger.info(f"Loading original file: {original_file_path}")
+                  df_merged = pl.read_parquet(original_file_path)
+                  logger.info(f"Original {year_file} shape: {df_merged.shape}")
+                  os.remove(original_file_path) # Clean up downloaded original
+              except Exception as e:
+                  logger.error(f"Failed to download or load original {year_file} from Hub: {e}. Skipping merge for this year.")
+                  continue
+
+              # Merge embedding columns from artifacts
+              merged_cols_count = 0
+              for embed_file in embedding_files:
+                  try:
+                      logger.debug(f"Loading embedding file: {embed_file}")
+                      df_embed = pl.read_parquet(embed_file)
+                      # Find the embedding column (assume it's the model_key)
+                      embed_cols = [col for col in df_embed.columns if col not in df_merged.columns and col != 'id']
+                      
+                      if not embed_cols:
+                          logger.warning(f"No new embedding columns found in {embed_file}. Skipping.")
+                          continue
+                          
+                      for embed_col_name in embed_cols:
+                          logger.debug(f"Found embedding column '{embed_col_name}' in {embed_file}")
+
+                          # Select only id and the embedding column
+                          df_embed_subset = df_embed.select(['id', embed_col_name])
+
+                          # Left join embedding column onto the main dataframe
+                          if embed_col_name not in df_merged.columns:
+                               df_merged = df_merged.join(df_embed_subset, on='id', how='left')
+                               logger.info(f"Merged column '{embed_col_name}'. New shape: {df_merged.shape}")
+                               merged_cols_count += 1
+                          else:
+                               logger.warning(f"Column '{embed_col_name}' already exists in the merged DataFrame. Skipping merge from {embed_file}.")
+
+                  except Exception as e:
+                      logger.error(f"Failed to process or merge embedding file {embed_file}: {e}")
+
+              if merged_cols_count > 0:
+                  # Save locally before upload
+                  try:
+                      logger.info(f"Saving final merged file locally: {local_final_path}")
+                      df_merged.write_parquet(local_final_path, compression='zstd')
+
+                      # Upload the final merged file
+                      logger.info(f"Uploading final {year_file} to Hub...")
+                      upload_file(
+                          path_or_fileobj=local_final_path,
+                          path_in_repo=year_file, # Overwrite the file in the repo root
+                          repo_id=repo_id,
+                          repo_type="dataset",
+                          commit_message=f"Add/Update embeddings for {year_file}"
+                      )
+                      logger.info(f"Successfully uploaded updated {year_file}.")
+                  except Exception as e:
+                      logger.error(f"Failed to save or upload final {year_file}: {e}")
+                  finally:
+                      if os.path.exists(local_final_path):
+                          os.remove(local_final_path) # Clean up local final file
+              else:
+                  logger.warning(f"No new embedding columns were merged for {year_file}. Nothing to upload.")
+
+          logger.info("--- Merge and Upload Job Finished ---")
+        shell: python
