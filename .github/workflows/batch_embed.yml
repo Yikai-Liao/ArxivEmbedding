@@ -51,14 +51,8 @@ jobs:
           # Ensure output directory exists (script does this too, but good practice)
           mkdir -p $OUTPUT_DIR
           
-          # Execute the script. It will now set the outputs directly if running in Actions.
-          python script/local_split_tasks.py \\
-            --repo-id "$REPO_ID" \\
-            --matrix-count "$MATRIX_COUNT" \\
-            --years "$TARGET_YEARS" \\
-            --config-file "$CONFIG_FILE" \\
-            --output-dir "$OUTPUT_DIR" \\
-            --max-tasks-per-matrix 10
+          # Execute the script on a single line to avoid backslash issues
+          python script/local_split_tasks.py --repo-id "$REPO_ID" --matrix-count "$MATRIX_COUNT" --years "$TARGET_YEARS" --config-file "$CONFIG_FILE" --output-dir "$OUTPUT_DIR" --max-tasks-per-matrix 10
             
           # Script's stdout/stderr will still be printed for logging.
           # No need for manual parsing or setting outputs here anymore.
@@ -144,16 +138,8 @@ jobs:
           echo "Task File: $TASK_FILE"
           echo "Output Directory: $OUTPUT_DIR"
 
-          # Run the new Python script
-          python script/process_matrix_tasks.py \
-            --matrix-id $MATRIX_ID \
-            --task-file $TASK_FILE \
-            --output-dir $OUTPUT_DIR \
-            --config-file config.toml \
-            --repo-id $REPO_ID \
-            --batch-size 4 \
-            --engine torch \
-            --device cpu # Use "cuda" for GPU
+          # Run the script on a single line
+          python script/process_matrix_tasks.py --matrix-id $MATRIX_ID --task-file $TASK_FILE --output-dir $OUTPUT_DIR --config-file config.toml --repo-id $REPO_ID --batch-size 4 --engine torch --device cpu
 
       - name: Upload matrix output artifacts
         uses: actions/upload-artifact@v4
@@ -208,8 +194,7 @@ jobs:
           # REPO_ID is passed as argument
         run: |
           echo "Running merge and upload script..."
-          python script/merge_upload.py \
-            --repo-id "lyk/ArxivEmbedding" \
-            --artifacts-dir "artifacts" # Default dir where artifacts are downloaded
+          # Run the script on a single line
+          python script/merge_upload.py --repo-id "lyk/ArxivEmbedding" --artifacts-dir "artifacts"
             
           echo "Merge and upload script finished."
