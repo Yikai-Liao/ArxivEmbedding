@@ -200,9 +200,7 @@ def main():
             # Create empty summary files
             with open(output_dir / "processed_tasks.json", "w") as f: json.dump([], f)
             with open(output_dir / "failed_tasks.json", "w") as f: json.dump([], f)
-            with open(output_dir / "summary.txt", "w") as f: f.write(f"Matrix {args.matrix_id} Summary
-No tasks found.
-")
+            with open(output_dir / "summary.txt", "w") as f: f.write(f"Matrix {args.matrix_id} Summary\nNo tasks found.\n")
             return 0
     except Exception as e:
         log.error(f"Failed to load tasks from {args.task_file}: {e}")
