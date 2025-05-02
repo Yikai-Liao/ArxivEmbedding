@@ -45,10 +45,12 @@ jobs:
         run: |
           import os
           import sys
-          from huggingface_hub import HfApi
+          from huggingface_hub import HfApi, hf_hub_download
           import toml
           import json
           import math
+          import polars as pl
+          from tqdm import tqdm
           
           # 获取需要处理的年份列表（如果有指定）
           target_years_input = os.environ.get('TARGET_YEARS', '').strip()
@@ -70,7 +72,7 @@ jobs:
               
           print(f"Found yearly files to process: {year_files}")
           
-          # 正确解析TOML中的嵌套表结构
+          # 解析配置文件中的模型
           config = toml.load("config.toml")
           embedding_configs = {}
           
@@ -93,70 +95,134 @@ jobs:
           
           if not model_keys:
               print("错误: 无法从config.toml中找到模型配置。")
-              # 为确保工作流可以继续，在CI环境中提供默认值
-              print("使用实际配置文件中的默认模型:")
-              embedding_configs = {
-                  "jasper_v1": {"model_name": "NovaSearch/jasper_en_vision_language_v1"},
-                  "conan_v1": {"model_name": "TencentBAC/Conan-embedding-v1"}
-              }
-              model_keys = list(embedding_configs.keys())
+              sys.exit(1)
           
           print(f"Found model keys: {model_keys}")
           print(f"Models with configurations:")
           for k, v in embedding_configs.items():
               print(f"  - {k}: {v}")
           
-          # Create all possible task combinations
-          all_tasks = []
-          for year_file in year_files:
-              for model_key in model_keys:
-                  all_tasks.append({"year_file": year_file, "model_key": model_key})
+          # 新的基于ID的任务分配方法
+          # 收集所有年份文件中的ID
+          all_ids = []
+          year_id_map = {}  # 记录每个ID属于哪个年份文件
+
+          print("开始下载并读取所有年份文件的ID...")
+          for year_file in tqdm(year_files, desc="读取文件ID"):
+              try:
+                  # 下载年份文件
+                  file_path = hf_hub_download(
+                      repo_id=os.environ['REPO_ID'],
+                      filename=year_file,
+                      repo_type="dataset",
+                      local_dir=".",
+                      local_dir_use_symlinks=False
+                  )
+                  
+                  # 只读取ID列，减少内存使用
+                  df = pl.read_parquet(file_path, columns=["id"])
+                  file_ids = df["id"].to_list()
+                  
+                  # 记录ID与年份文件的对应关系
+                  for id_value in file_ids:
+                      year_id_map[id_value] = year_file
+                  
+                  # 收集所有ID
+                  all_ids.extend(file_ids)
+                  
+                  # 清理下载的文件
+                  os.remove(file_path)
+                  
+                  print(f"已从 {year_file} 读取 {len(file_ids)} 个ID")
+              except Exception as e:
+                  print(f"读取 {year_file} 时出错: {e}")
           
-          total_tasks = len(all_tasks)
-          print(f"Total tasks to process: {total_tasks}")
+          # 去重
+          unique_ids = list(set(all_ids))
+          print(f"Total unique IDs across all files: {len(unique_ids)}")
           
-          # Create balanced task matrices
+          # 计算每个模型处理的总任务数
+          total_tasks = len(unique_ids) * len(model_keys)
+          print(f"Total tasks (unique IDs × models): {total_tasks}")
+          
+          # 根据矩阵数量均匀分配ID
           target_matrix_count = int(os.environ['MATRIX_COUNT'])
-          # Adjust if we have fewer tasks than requested matrices
-          actual_matrix_count = min(target_matrix_count, total_tasks)
           
-          if actual_matrix_count == 0:
-              print("没有任务需要处理或未找到有效的文件和模型组合")
-              task_matrices = []
+          # 计算合理的矩阵数量
+          if total_tasks < target_matrix_count:
+              # 少任务时使用更少的矩阵
+              if total_tasks <= 10:
+                  actual_matrix_count = 1  # 非常少的任务，使用1个矩阵
+              elif total_tasks <= 50:
+                  actual_matrix_count = min(total_tasks // 10 + 1, 5)  # 适中的任务数，最多5个矩阵
+              else:
+                  actual_matrix_count = min(total_tasks // 20 + 1, 10)  # 较多任务，最多10个矩阵
+              print(f"任务总数({total_tasks})少于请求的矩阵数量({target_matrix_count})，将使用{actual_matrix_count}个矩阵")
           else:
-              # Calculate tasks per matrix (rounded up to ensure all tasks are assigned)
-              tasks_per_matrix = math.ceil(total_tasks / actual_matrix_count)
-              
-              # Distribute tasks across matrices
-              task_matrices = []
-              for i in range(actual_matrix_count):
-                  start_idx = i * tasks_per_matrix
-                  end_idx = min((i + 1) * tasks_per_matrix, total_tasks)
-                  if start_idx < total_tasks:  # Only add non-empty matrices
-                      matrix_tasks = all_tasks[start_idx:end_idx]
-                      task_matrices.append({
-                          "matrix_id": i,
-                          "tasks": matrix_tasks
-                      })
-              
-              # Check if we got a reasonable distribution
-              actual_matrices = len(task_matrices)
-              print(f"Created {actual_matrices} matrices with approximately {tasks_per_matrix} tasks each")
+              actual_matrix_count = min(target_matrix_count, total_tasks)
           
-          # Save task matrices to temporary file to be used by workers
+          # 确保至少有一个矩阵
+          actual_matrix_count = max(1, actual_matrix_count)
+          
+          # 每个矩阵处理的ID数量
+          ids_per_matrix = math.ceil(len(unique_ids) / actual_matrix_count)
+          
+          # 创建任务矩阵
+          task_matrices = []
+          for i in range(actual_matrix_count):
+              start_idx = i * ids_per_matrix
+              end_idx = min((i + 1) * ids_per_matrix, len(unique_ids))
+              
+              if start_idx < len(unique_ids):
+                  # 当前矩阵负责的ID
+                  matrix_ids = unique_ids[start_idx:end_idx]
+                  
+                  # 创建模型和ID的任务组合
+                  matrix_tasks = []
+                  for id_value in matrix_ids:
+                      year_file = year_id_map[id_value]
+                      for model_key in model_keys:
+                          matrix_tasks.append({
+                              "id": id_value,
+                              "year_file": year_file,
+                              "model_key": model_key
+                          })
+                  
+                  task_matrices.append({
+                      "matrix_id": i,
+                      "tasks": matrix_tasks
+                  })
+          
+          # 检查分配情况
+          actual_matrices = len(task_matrices)
+          total_assigned_tasks = sum(len(matrix["tasks"]) for matrix in task_matrices)
+          print(f"创建了 {actual_matrices} 个矩阵，分配了总计 {total_assigned_tasks} 个任务")
+          
+          # 输出任务矩阵信息
+          for i, matrix in enumerate(task_matrices):
+              task_count = len(matrix["tasks"])
+              print(f"矩阵 {i}: {task_count} 个任务")
+          
+          # 保存任务矩阵到临时文件
           with open("task_matrices.json", "w") as f:
               json.dump(task_matrices, f)
           
-          # Output for GitHub Actions
+          # 输出到GitHub Actions
           task_matrices_json = json.dumps(task_matrices)
           # 使用新版的输出语法
           with open(os.environ["GITHUB_OUTPUT"], "a") as f:
               f.write(f"task_matrices={task_matrices_json}\n")
               f.write(f"total_tasks={total_tasks}\n")
           
-          # Upload task matrices as artifact for reference
+          # 上传任务矩阵作为参考
           with open("all_tasks.json", "w") as f:
-              json.dump(all_tasks, f)
+              all_tasks_info = {
+                  "total_unique_ids": len(unique_ids),
+                  "total_models": len(model_keys),
+                  "total_tasks": total_tasks,
+                  "matrices_count": actual_matrices
+              }
+              json.dump(all_tasks_info, f)
         shell: python # Use python shell directly
           
       - name: Upload task definitions
@@ -204,113 +270,207 @@ jobs:
         run: |
           import os
           import json
-          import subprocess
           import sys
           from pathlib import Path
+          from collections import defaultdict
           from huggingface_hub import hf_hub_download
           from tqdm import tqdm
+          import polars as pl
           from loguru import logger
+          import subprocess
+          import re
           
           logger.remove()
           logger.add(sys.stderr, level="INFO", format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <level>{message}</level>")
-
-          # Parse the tasks assigned to this matrix
+          
+          # 解析分配给此矩阵的任务
           matrix_id = int(os.environ["MATRIX_ID"])
           tasks = json.loads(os.environ["MATRIX_TASKS"])
           
-          logger.info(f"Matrix {matrix_id} processing {len(tasks)} tasks")
+          logger.info(f"矩阵 {matrix_id} 处理 {len(tasks)} 个任务")
+          
+          # 按年份文件分组任务，以便高效下载和处理
+          tasks_by_year_file = defaultdict(list)
+          tasks_by_model = defaultdict(list)
+          
+          for task in tasks:
+              year_file = task["year_file"]
+              model_key = task["model_key"]
+              id_value = task["id"]
+              tasks_by_year_file[year_file].append(task)
+              tasks_by_model[model_key].append(task)
+          
+          logger.info(f"任务涉及 {len(tasks_by_year_file)} 个不同年份文件和 {len(tasks_by_model)} 个不同模型")
+          
+          # 创建输出目录
+          output_dir = Path(f"matrix_output_{matrix_id}")
+          output_dir.mkdir(exist_ok=True)
           
           processed_tasks = []
           failed_tasks = []
           
-          # Create output directory for this matrix
-          output_dir = Path(f"matrix_output_{matrix_id}")
-          output_dir.mkdir(exist_ok=True)
+          # 创建用于追踪已处理ID的集合
+          processed_ids = set()
           
-          # Process each task
-          for task_idx, task in enumerate(tqdm(tasks, desc=f"Matrix {matrix_id} Tasks")):
-              year_file = task["year_file"]
-              model_key = task["model_key"]
+          # 按年份文件分组处理
+          for year_file, year_tasks in tqdm(tasks_by_year_file.items(), desc=f"处理年份文件"):
+              # 找出此年份文件需要处理的ID和模型
+              ids_to_process = set(task["id"] for task in year_tasks)
+              models_for_this_year = set(task["model_key"] for task in year_tasks)
               
-              logger.info(f"Processing task {task_idx+1}/{len(tasks)}: {year_file} with model {model_key}")
+              logger.info(f"处理 {year_file}: {len(ids_to_process)} 个ID, {len(models_for_this_year)} 个模型")
               
-              # Download the year file
+              # 下载整个年份文件
               try:
-                  input_file_path = hf_hub_download(
+                  file_path = hf_hub_download(
                       repo_id=os.environ["REPO_ID"],
                       filename=year_file,
                       repo_type="dataset",
                       local_dir=".",
                       local_dir_use_symlinks=False
                   )
-                  logger.info(f"Downloaded {year_file} to {input_file_path}")
-              except Exception as e:
-                  logger.error(f"Failed to download {year_file}: {e}")
-                  failed_tasks.append({"year_file": year_file, "model_key": model_key, "error": f"Download failed: {str(e)}"})
-                  continue
+                  logger.info(f"下载 {year_file} 到 {file_path}")
                   
-              # Output file for this specific task
-              output_file = output_dir / f"embedded-{year_file}-{model_key}.parquet"
-              
-              # Run embedding generation
-              try:
-                  cmd = [
-                      "python", "script/generate_embeddings.py",
-                      "--input-file", input_file_path,
-                      "--output-file", str(output_file),
-                      "--model-key", model_key,
-                      "--config-file", "config.toml",
-                      "--batch-size", "2",
-                      "--engine", "torch",
-                      "--device", "cpu"  # Change to cuda if running on GPU
-                  ]
+                  # 读取数据并过滤出需要处理的ID
+                  df = pl.read_parquet(file_path)
+                  filtered_df = df.filter(pl.col("id").is_in(ids_to_process))
                   
-                  logger.info(f"Running command: {' '.join(cmd)}")
-                  process = subprocess.run(cmd, check=True, capture_output=True, text=True)
+                  logger.info(f"从 {year_file} 中过滤出 {filtered_df.height} 条记录（总共 {df.height} 条）")
                   
-                  if process.returncode == 0:
-                      logger.info(f"Successfully generated embeddings for {year_file} with model {model_key}")
-                      processed_tasks.append({"year_file": year_file, "model_key": model_key, "output_file": str(output_file)})
-                  else:
-                      logger.error(f"Command failed with return code {process.returncode}")
-                      logger.error(f"STDOUT: {process.stdout}")
-                      logger.error(f"STDERR: {process.stderr}")
-                      failed_tasks.append({"year_file": year_file, "model_key": model_key, "error": f"Process error: {process.stderr}"})
+                  # 如果过滤后没有记录，跳过处理
+                  if filtered_df.height == 0:
+                      logger.warning(f"{year_file} 中没有找到需要处理的ID，跳过处理")
+                      continue
+                  
+                  # 保存过滤后的数据到临时文件
+                  temp_file = f"temp_{matrix_id}_{year_file}"
+                  filtered_df.write_parquet(temp_file)
+                  logger.info(f"将过滤后的数据保存到临时文件 {temp_file}")
+                  
+                  # 为每个模型处理过滤后的数据
+                  for model_key in models_for_this_year:
+                      # 跳过已处理的组合
+                      output_file = output_dir / f"embedded-{year_file}-{model_key}.parquet"
+                      
+                      logger.info(f"为 {year_file} 和模型 {model_key} 生成嵌入向量")
+                      
+                      try:
+                          # 运行嵌入生成
+                          cmd = [
+                              "python", "script/generate_embeddings.py",
+                              "--input-file", temp_file,
+                              "--output-file", str(output_file),
+                              "--model-key", model_key,
+                              "--config-file", "config.toml",
+                              "--batch-size", "32",  # 增大批处理大小
+                              "--engine", "torch",
+                              "--device", "cpu"  # 使用GPU请改为"cuda"
+                          ]
+                          
+                          logger.info(f"运行命令: {' '.join(cmd)}")
+                          process = subprocess.run(cmd, check=True, capture_output=True, text=True)
+                          
+                          if process.returncode == 0:
+                              logger.info(f"成功为 {year_file} 和模型 {model_key} 生成嵌入向量")
+                              # 记录每个成功处理的ID和模型组合
+                              for id_value in filtered_df["id"].to_list():
+                                  processed_tasks.append({
+                                      "id": id_value,
+                                      "year_file": year_file,
+                                      "model_key": model_key,
+                                      "output_file": str(output_file)
+                                  })
+                                  processed_ids.add(id_value)
+                          else:
+                              logger.error(f"命令返回非零状态码 {process.returncode}")
+                              logger.error(f"STDOUT: {process.stdout}")
+                              logger.error(f"STDERR: {process.stderr}")
+                              # 记录失败的模型和年份组合
+                              for id_value in filtered_df["id"].to_list():
+                                  failed_tasks.append({
+                                      "id": id_value,
+                                      "year_file": year_file,
+                                      "model_key": model_key,
+                                      "error": f"处理错误: {process.stderr}"
+                                  })
+                      
+                      except Exception as e:
+                          logger.error(f"运行嵌入生成时出错: {e}")
+                          for id_value in filtered_df["id"].to_list():
+                              failed_tasks.append({
+                                  "id": id_value,
+                                  "year_file": year_file,
+                                  "model_key": model_key,
+                                  "error": str(e)
+                              })
+                  
+                  # 清理临时文件
+                  try:
+                      if os.path.exists(temp_file):
+                          os.remove(temp_file)
+                  except Exception as e:
+                      logger.warning(f"无法删除临时文件 {temp_file}: {e}")
               
               except Exception as e:
-                  logger.error(f"Error running embedding generation: {e}")
-                  failed_tasks.append({"year_file": year_file, "model_key": model_key, "error": str(e)})
+                  logger.error(f"下载或处理 {year_file} 时出错: {e}")
+                  for task in year_tasks:
+                      failed_tasks.append({
+                          "id": task["id"],
+                          "year_file": year_file,
+                          "model_key": task["model_key"],
+                          "error": f"下载失败: {str(e)}"
+                      })
               
-              # Clean up downloaded file after processing
-              try:
-                  if os.path.exists(input_file_path):
-                      os.remove(input_file_path)
-              except Exception as e:
-                  logger.warning(f"Could not remove downloaded file {input_file_path}: {e}")
+              finally:
+                  # 清理下载的文件
+                  try:
+                      if 'file_path' in locals() and os.path.exists(file_path):
+                          os.remove(file_path)
+                  except Exception as e:
+                      logger.warning(f"无法删除下载的文件 {file_path}: {e}")
           
-          # Write results as JSON for the artifact
+          # 检查是否所有分配的ID都已处理
+          assigned_ids = set(task["id"] for task in tasks)
+          missed_ids = assigned_ids - processed_ids
+          
+          if missed_ids:
+              logger.warning(f"有 {len(missed_ids)} 个ID未能成功处理: {list(missed_ids)[:10]}{'...' if len(missed_ids) > 10 else ''}")
+          
+          # 将结果写入JSON供artifacts使用
           with open(output_dir / "processed_tasks.json", "w") as f:
               json.dump(processed_tasks, f, indent=2)
               
           with open(output_dir / "failed_tasks.json", "w") as f:
               json.dump(failed_tasks, f, indent=2)
               
-          # Summary
-          logger.info(f"Matrix {matrix_id} completed. Processed: {len(processed_tasks)}, Failed: {len(failed_tasks)}")
+          # 摘要
+          success_percent = 100 * len(processed_tasks) / len(tasks) if tasks else 0
+          logger.info(f"矩阵 {matrix_id} 完成。成功: {len(processed_tasks)} ({success_percent:.1f}%), 失败: {len(failed_tasks)}")
           
-          # Create a summary file for easy viewing
+          # 创建易于阅读的摘要文件
           with open(output_dir / "summary.txt", "w") as f:
-              f.write(f"Matrix {matrix_id} Summary\n")
+              f.write(f"矩阵 {matrix_id} 摘要\n")
               f.write(f"==================\n")
-              f.write(f"Total tasks: {len(tasks)}\n")
-              f.write(f"Successful: {len(processed_tasks)}\n")
-              f.write(f"Failed: {len(failed_tasks)}\n\n")
+              f.write(f"总任务数: {len(tasks)}\n")
+              f.write(f"成功: {len(processed_tasks)} ({success_percent:.1f}%)\n")
+              f.write(f"失败: {len(failed_tasks)}\n\n")
               
               if failed_tasks:
-                  f.write("Failed Tasks:\n")
-                  for idx, task in enumerate(failed_tasks):
-                      f.write(f"{idx+1}. {task['year_file']} - {task['model_key']}: {task['error']}\n")
-        shell: python
+                  failure_by_reason = defaultdict(int)
+                  for task in failed_tasks:
+                      error_msg = task["error"]
+                      # 简化错误消息以便分组
+                      simplified_error = re.sub(r'\b[a-zA-Z0-9]{8,}\b', '[ID]', error_msg)
+                      simplified_error = re.sub(r'\d+', '[NUM]', simplified_error)
+                      failure_by_reason[simplified_error[:100]] += 1
+                  
+                  f.write("失败原因统计:\n")
+                  for reason, count in sorted(failure_by_reason.items(), key=lambda x: x[1], reverse=True):
+                      f.write(f"- {reason}... ({count} 次)\n")
+                  
+                  f.write("\n前10个失败任务:\n")
+                  for idx, task in enumerate(failed_tasks[:10]):
+                      f.write(f"{idx+1}. {task['year_file']} - {task['model_key']} - ID: {task['id']}: {task['error'][:100]}...\n")
 
       - name: Upload matrix output artifacts
         uses: actions/upload-artifact@v4
