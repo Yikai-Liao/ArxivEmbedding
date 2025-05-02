@@ -52,6 +52,7 @@ jobs:
           import math
           import polars as pl
           from tqdm import tqdm
+          from collections import defaultdict
           
           # 获取需要处理的年份列表（如果有指定）
           target_years_input = os.environ.get('TARGET_YEARS', '').strip()
@@ -141,78 +142,132 @@ jobs:
           unique_ids = list(set(all_ids))
           print(f"Total unique IDs across all files: {len(unique_ids)}")
           
-          # 计算每个模型处理的总任务数
-          total_tasks = len(unique_ids) * len(model_keys)
-          print(f"Total tasks (unique IDs × models): {total_tasks}")
-          
+          # --- Filter tasks: Check for existing embeddings --- 
+          print("开始检查已存在的嵌入...")
+          needed_tasks = []
+          tasks_to_check_by_year = defaultdict(list)
+
+          # Group potential tasks by year file first
+          for id_value in unique_ids:
+              year_file = year_id_map.get(id_value)
+              if year_file:
+                  for model_key in model_keys:
+                      tasks_to_check_by_year[year_file].append({"id": id_value, "model_key": model_key})
+              else:
+                   print(f"警告：未找到ID {id_value} 对应的年份文件（在检查阶段），跳过。")
+
+          processed_year_files = set()
+          for year_file, potential_tasks in tqdm(tasks_to_check_by_year.items(), desc="检查年份文件"):
+               try:
+                   print(f"检查文件: {year_file}")
+                   # Download year file ONCE per year
+                   file_path = hf_hub_download(
+                       repo_id=os.environ['REPO_ID'],
+                       filename=year_file,
+                       repo_type="dataset",
+                       local_dir=".",
+                   )
+                   
+                   # Load dataframe and schema
+                   df_year = pl.read_parquet(file_path)
+                   schema = df_year.schema
+                   print(f"  文件 {year_file} schema: {list(schema.keys())}")
+
+                   # Check tasks for this year
+                   ids_in_file = set(df_year["id"].to_list()) # For quick ID existence check
+                   for task in potential_tasks:
+                       model_key = task["model_key"]
+                       id_value = task["id"]
+
+                       # Basic check: Does the ID exist in this year file?
+                       if id_value not in ids_in_file:
+                            print(f"  警告：ID {id_value} 在文件 {year_file} 中未找到，跳过任务 {model_key}")
+                            continue
+                            
+                       # Check 1: Does the embedding column exist?
+                       if model_key not in schema:
+                           # Column doesn't exist, need to generate
+                           needed_tasks.append({"id": id_value, "year_file": year_file, "model_key": model_key})
+                           # print(f"  需要任务: {id_value} - {model_key} (列不存在)")
+                       else:
+                           # Column exists, check if the value for this ID is null
+                           embedding_value = df_year.filter(pl.col("id") == id_value).select(pl.col(model_key)).item()
+                           # Polars returns None for null values in list columns when using item()
+                           if embedding_value is None:
+                               needed_tasks.append({"id": id_value, "year_file": year_file, "model_key": model_key})
+                               # print(f"  需要任务: {id_value} - {model_key} (值为空)")
+                           # else: # Value exists, skip task
+                           #     print(f"  跳过任务: {id_value} - {model_key} (值已存在)")
+
+                   # Clean up downloaded file
+                   os.remove(file_path)
+                   processed_year_files.add(year_file)
+
+               except Exception as e:
+                   print(f"检查 {year_file} 时出错: {e}。将假设该文件所有任务都需要处理。")
+                   # Fallback: If check fails, assume all potential tasks for this year are needed
+                   for task in potential_tasks:
+                        needed_tasks.append({"id": task["id"], "year_file": year_file, "model_key": task["model_key"]})
+                   # Attempt cleanup even on error
+                   if 'file_path' in locals() and os.path.exists(file_path):
+                       try: os.remove(file_path) 
+                       except OSError: pass
+
+          total_potential_tasks = len(unique_ids) * len(model_keys)
+          total_needed_tasks = len(needed_tasks)
+          print(f"检查完成。总潜在任务数: {total_potential_tasks}。实际需要处理的任务数: {total_needed_tasks}")
+           
           # 根据矩阵数量均匀分配ID
           target_matrix_count = int(os.environ['MATRIX_COUNT'])
+          limit_per_matrix = 10 # Limit tasks per matrix for testing
+          print(f"测试模式：每个矩阵最多处理 {limit_per_matrix} 个任务。")
           
-          # 计算合理的矩阵数量
-          actual_matrix_count = target_matrix_count # Start with requested count
-          if total_tasks == 0:
-              actual_matrix_count = 0 # No tasks, no matrices
-              print("警告：没有找到任何需要处理的任务。")
-          elif total_tasks < target_matrix_count:
-              # 少任务时使用更少的矩阵
-              if total_tasks <= 10:
-                  actual_matrix_count = 1  # 非常少的任务，使用1个矩阵
-              elif total_tasks <= 50:
-                  actual_matrix_count = min(total_tasks // 10 + 1, 5)  # 适中的任务数，最多5个矩阵
-              else:
-                  actual_matrix_count = min(total_tasks // 20 + 1, 10)  # 较多任务，最多10个矩阵
-              # Ensure actual_matrix_count does not exceed total_tasks if total_tasks is very small
-              actual_matrix_count = min(actual_matrix_count, total_tasks)
-              print(f"任务总数({total_tasks})少于请求的矩阵数量({target_matrix_count})，将使用{actual_matrix_count}个矩阵")
+          # 计算合理的矩阵数量 - 基于需要的任务和限制
+          if total_needed_tasks == 0:
+               actual_matrix_count = 0 # No tasks, no matrices
+               print("警告：没有找到任何需要处理的任务。")
           else:
-              actual_matrix_count = min(target_matrix_count, total_tasks)
-          
-          # 确保至少有一个矩阵 if there are tasks
-          if total_tasks > 0:
-              actual_matrix_count = max(1, actual_matrix_count)
-          else:
-              actual_matrix_count = 0 # Still 0 if no tasks
+              # Calculate matrices needed based on the limit
+              required_matrices = math.ceil(total_needed_tasks / limit_per_matrix)
+              # Use the smaller of user request and calculated requirement, but at least 1 if tasks exist
+              actual_matrix_count = min(target_matrix_count, required_matrices)
+              actual_matrix_count = max(1, actual_matrix_count) 
+              print(f"根据任务数({total_needed_tasks})和限制({limit_per_matrix})，需要 {required_matrices} 个矩阵。将使用 {actual_matrix_count} 个矩阵 (受请求数 {target_matrix_count} 限制)。")
 
           task_matrices_for_strategy = [] # Keep this for generating matrix IDs
           
           if actual_matrix_count > 0:
-              # 每个矩阵处理的ID数量
-              ids_per_matrix = math.ceil(len(unique_ids) / actual_matrix_count)
+              # Distribute *needed_tasks* among the matrices, respecting the limit
               
               # 创建任务文件
               os.makedirs("matrix_tasks", exist_ok=True) # Directory to hold task files
               
               assigned_task_count_total = 0
+              tasks_to_distribute = needed_tasks # Use the filtered list
+              # Shuffle tasks to get a more random sample for testing if desired
+              # import random
+              # random.shuffle(tasks_to_distribute)
+
               for i in range(actual_matrix_count):
-                  start_idx = i * ids_per_matrix
-                  end_idx = min((i + 1) * ids_per_matrix, len(unique_ids))
+                  # Assign tasks to this matrix, up to the limit
+                  start_idx = i * limit_per_matrix
+                  end_idx = min(start_idx + limit_per_matrix, total_needed_tasks)
                   
-                  matrix_tasks = []
-                  if start_idx < len(unique_ids):
-                      # 当前矩阵负责的ID
-                      matrix_ids = unique_ids[start_idx:end_idx]
-                      
-                      # 创建模型和ID的任务组合
-                      for id_value in matrix_ids:
-                          year_file = year_id_map.get(id_value) # Use .get for safety
-                          if year_file: # Ensure ID was found in map
-                              for model_key in model_keys:
-                                  matrix_tasks.append({
-                                      "id": id_value,
-                                      "year_file": year_file,
-                                      "model_key": model_key
-                                  })
-                          else:
-                              print(f"警告：未找到ID {id_value} 对应的年份文件，跳过此ID。")
+                  # Slice the needed tasks for this matrix
+                  matrix_tasks = tasks_to_distribute[start_idx:end_idx]
 
                   # Save tasks for this matrix to a JSON file
                   matrix_task_file = f"matrix_tasks/matrix_{i}_tasks.json"
                   with open(matrix_task_file, "w") as f:
                       json.dump(matrix_tasks, f)
                   
-                  assigned_task_count_total += len(matrix_tasks)
+                  assigned_task_count_total += len(matrix_tasks)                  
                   print(f"矩阵 {i}: 分配了 {len(matrix_tasks)} 个任务，保存到 {matrix_task_file}")
                   task_matrices_for_strategy.append({"matrix_id": i}) # Add matrix ID for strategy
+
+                  # Stop assigning if we've run out of tasks
+                  if end_idx >= total_needed_tasks:
+                      break 
 
               print(f"总共分配了 {assigned_task_count_total} 个任务到 {actual_matrix_count} 个矩阵文件中。")
 
@@ -222,7 +277,7 @@ jobs:
 
           with open(os.environ["GITHUB_OUTPUT"], "a") as f:
               f.write(f"task_matrices={task_matrices_json}\n")
-              f.write(f"total_tasks={total_tasks}\n")
+              f.write(f"total_tasks={total_needed_tasks}\n")
               f.write(f"matrix_count={matrix_count}\n") # Add matrix_count output
           
           # 上传任务信息 (optional, for debugging)
@@ -230,7 +285,7 @@ jobs:
               all_tasks_info = {
                   "total_unique_ids": len(unique_ids),
                   "total_models": len(model_keys),
-                  "total_tasks": total_tasks,
+                  "total_tasks": total_needed_tasks,
                   "target_matrices_requested": target_matrix_count,
                   "actual_matrices_created": actual_matrix_count
               }
