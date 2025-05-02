@@ -117,7 +117,6 @@ jobs:
                       filename=year_file,
                       repo_type="dataset",
                       local_dir=".",
-                      local_dir_use_symlinks=False
                   )
                   
                   # 只读取ID列，减少内存使用
@@ -421,7 +420,7 @@ jobs:
               # Download the original file from the Hub to merge into
               try:
                   logger.info(f"Downloading original {year_file} from Hub...")
-                  original_file_path = hf_hub_download(repo_id=repo_id, filename=year_file, repo_type='dataset', local_dir='.', local_dir_use_symlinks=False)
+                  original_file_path = hf_hub_download(repo_id=repo_id, filename=year_file, repo_type='dataset', local_dir='.')
                   logger.info(f"Loading original file: {original_file_path}")
                   # Ensure 'id' column is read as string/object if necessary
                   # Let Polars infer for now, but be mindful if IDs cause issues

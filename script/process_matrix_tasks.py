@@ -59,7 +59,6 @@ def process_model_year_batch(
             filename=year_file,
             repo_type="dataset",
             local_dir=".", # Download to current dir
-            local_dir_use_symlinks=False,
         )
         logger.info(f"Downloaded to {file_path}") # Use logger
 
