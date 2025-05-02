@@ -42,7 +42,7 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           REPO_ID: ${{ inputs.repo_id || 'lyk/ArxivEmbedding' }}
           MATRIX_COUNT: ${{ inputs.matrix_count || 10 }}
-          TARGET_YEARS: ${{ inputs.target_years || '' }} # Pass target years, default to empty string
+          TARGET_YEARS: ${{ inputs.years || '' }} # Corrected: use inputs.years
           CONFIG_FILE: config.toml
           OUTPUT_DIR: matrix_tasks # Directory for task files
           THRESHOLD: 1e-7 # Keep threshold consistent if needed, though script has it hardcoded now
