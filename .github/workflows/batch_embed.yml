@@ -219,39 +219,55 @@ jobs:
            
           # 根据矩阵数量均匀分配ID
           target_matrix_count = int(os.environ['MATRIX_COUNT'])
-          limit_per_matrix = 10 # Limit tasks per matrix for testing
-          print(f"测试模式：每个矩阵最多处理 {limit_per_matrix} 个任务。")
+          # limit_per_matrix = 10 # Limit tasks per matrix for testing
+          # print(f"测试模式：每个矩阵最多处理 {limit_per_matrix} 个任务。")
           
           # 计算合理的矩阵数量 - 基于需要的任务和限制
           if total_needed_tasks == 0:
                actual_matrix_count = 0 # No tasks, no matrices
                print("警告：没有找到任何需要处理的任务。")
           else:
-              # Calculate matrices needed based on the limit
-              required_matrices = math.ceil(total_needed_tasks / limit_per_matrix)
-              # Use the smaller of user request and calculated requirement, but at least 1 if tasks exist
-              actual_matrix_count = min(target_matrix_count, required_matrices)
-              actual_matrix_count = max(1, actual_matrix_count) 
-              print(f"根据任务数({total_needed_tasks})和限制({limit_per_matrix})，需要 {required_matrices} 个矩阵。将使用 {actual_matrix_count} 个矩阵 (受请求数 {target_matrix_count} 限制)。")
+              # --- 修改: 不再使用固定 limit_per_matrix ---
+              # Calculate the number of tasks per matrix, aiming for the target_matrix_count
+              # If fewer tasks than matrices, each matrix gets at least one task
+              tasks_per_matrix = math.ceil(total_needed_tasks / target_matrix_count)
+              # Ensure at least one task per matrix if there are tasks
+              tasks_per_matrix = max(1, tasks_per_matrix) 
+              
+              # Calculate the actual number of matrices needed based on the calculated tasks_per_matrix
+              # This ensures we don't create empty matrices if tasks_per_matrix is large
+              actual_matrix_count = math.ceil(total_needed_tasks / tasks_per_matrix)
+              # Respect the user's requested matrix count as an upper limit, but ensure at least 1 matrix if tasks exist
+              actual_matrix_count = min(target_matrix_count, actual_matrix_count)
+              actual_matrix_count = max(1, actual_matrix_count)
+              
+              # Recalculate tasks_per_matrix based on the final actual_matrix_count
+              # This distributes tasks as evenly as possible among the *actual* matrices being used.
+              tasks_per_matrix = math.ceil(total_needed_tasks / actual_matrix_count)
+
+              print(f"总任务数: {total_needed_tasks}。目标矩阵数: {target_matrix_count}。实际使用矩阵数: {actual_matrix_count}。计算得到每个矩阵约处理: {tasks_per_matrix} 个任务。")
+              # --- 修改结束 ---
 
           task_matrices_for_strategy = [] # Keep this for generating matrix IDs
           
           if actual_matrix_count > 0:
-              # Distribute *needed_tasks* among the matrices, respecting the limit
+              # Distribute *needed_tasks* among the matrices
               
               # 创建任务文件
               os.makedirs("matrix_tasks", exist_ok=True) # Directory to hold task files
               
               assigned_task_count_total = 0
               tasks_to_distribute = needed_tasks # Use the filtered list
-              # Shuffle tasks to get a more random sample for testing if desired
+              # Shuffle tasks to get a more random sample if desired
               # import random
               # random.shuffle(tasks_to_distribute)
 
               for i in range(actual_matrix_count):
-                  # Assign tasks to this matrix, up to the limit
-                  start_idx = i * limit_per_matrix
-                  end_idx = min(start_idx + limit_per_matrix, total_needed_tasks)
+                  # --- 修改: 使用计算出的 tasks_per_matrix ---
+                  # Assign tasks to this matrix
+                  start_idx = i * tasks_per_matrix
+                  end_idx = min(start_idx + tasks_per_matrix, total_needed_tasks)
+                  # --- 修改结束 ---
                   
                   # Slice the needed tasks for this matrix
                   matrix_tasks = tasks_to_distribute[start_idx:end_idx]
@@ -262,13 +278,16 @@ jobs:
                       json.dump(matrix_tasks, f)
                   
                   assigned_task_count_total += len(matrix_tasks)                  
-                  print(f"矩阵 {i}: 分配了 {len(matrix_tasks)} 个任务，保存到 {matrix_task_file}")
+                  print(f"矩阵 {i}: 分配了 {len(matrix_tasks)} 个任务 (从索引 {start_idx} 到 {end_idx-1})，保存到 {matrix_task_file}")
                   task_matrices_for_strategy.append({"matrix_id": i}) # Add matrix ID for strategy
 
-                  # Stop assigning if we've run out of tasks
+                  # Stop assigning if we've run out of tasks (shouldn't happen with ceil division)
                   if end_idx >= total_needed_tasks:
                       break 
-
+              
+              # Recalculate actual_matrix_count based on how many matrices actually got tasks
+              # This handles the edge case where the calculation might slightly overestimate due to ceil
+              actual_matrix_count = len(task_matrices_for_strategy)
               print(f"总共分配了 {assigned_task_count_total} 个任务到 {actual_matrix_count} 个矩阵文件中。")
 
           # 输出到GitHub Actions
@@ -379,7 +398,7 @@ jobs:
             --output-dir $OUTPUT_DIR \
             --config-file config.toml \
             --repo-id $REPO_ID \
-            --batch-size 1 \
+            --batch-size 4 \
             --engine torch \
             --device cpu # Use "cuda" for GPU
 
