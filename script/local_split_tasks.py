@@ -213,59 +213,67 @@ def run_task_splitting(args):
     actual_matrix_count = 0
     task_matrices_for_strategy = []
     assigned_task_count_total = 0
-    max_tasks_per_file = args.max_tasks_per_matrix # Limit per file
     target_matrix_limit = args.matrix_count # Total number of matrices to create
 
     if total_needed_tasks > 0:
         os.makedirs(output_task_dir, exist_ok=True)
-        
+
         # Shuffle all potential tasks first
-        random.shuffle(needed_tasks) 
+        random.shuffle(needed_tasks)
 
-        # Determine the maximum number of tasks to actually assign based on limits
-        max_assignable_tasks = target_matrix_limit * max_tasks_per_file
-        
-        # Select the subset of tasks to distribute for this run
-        tasks_to_distribute = needed_tasks[:max_assignable_tasks]
-        total_assigned_tasks = len(tasks_to_distribute)
+        # Calculate ideal and actual tasks per matrix
+        ideal_tasks_per_matrix = math.ceil(total_needed_tasks / target_matrix_limit)
+        actual_tasks_per_matrix = min(ideal_tasks_per_matrix, args.max_tasks_per_matrix)
 
-        print(f"总共找到 {total_needed_tasks} 个任务，根据限制 (最多 {target_matrix_limit} 个矩阵，每个最多 {max_tasks_per_file} 个任务)，本次运行将分配 {total_assigned_tasks} 个任务。")
+        print(f"目标矩阵数: {target_matrix_limit}, 每个矩阵理想任务数: {ideal_tasks_per_matrix}, 每个矩阵实际任务数 (受 max_tasks_per_matrix={args.max_tasks_per_matrix} 限制): {actual_tasks_per_matrix}")
 
-        # Write the *selected* tasks to the summary file
+        # Determine the total tasks that will actually be assigned
+        total_tasks_to_assign = min(total_needed_tasks, actual_tasks_per_matrix * target_matrix_limit)
+
+        if total_tasks_to_assign < total_needed_tasks:
+             print(f"警告: 由于 max_tasks_per_matrix ({args.max_tasks_per_matrix}) 或 matrix_count ({target_matrix_limit}) 的限制，将丢弃 {total_needed_tasks - total_tasks_to_assign} 个任务。")
+
+        # Select the subset of tasks to distribute
+        tasks_to_distribute = needed_tasks[:total_tasks_to_assign]
+        assigned_task_count_total = len(tasks_to_distribute) # This is the final count of assigned tasks
+
+        # Write the *actually assigned* tasks to the summary file
         summary_file_path = os.path.join(output_task_dir, "all_tasks_info.json")
         try:
              with open(summary_file_path, "w") as f:
                  json.dump(tasks_to_distribute, f, indent=2)
-             print(f"已将分配的 {total_assigned_tasks} 个任务信息写入到 {summary_file_path}")
+             print(f"已将分配的 {assigned_task_count_total} 个任务信息写入到 {summary_file_path}")
         except Exception as e:
              print(f"错误: 无法写入任务摘要文件 {summary_file_path}: {e}")
-             # Continue distribution even if summary write fails?
+             # Consider if failure here should halt the process
 
         # Distribute the selected tasks into matrix files
         matrix_index = 0
         start_index = 0
-        while start_index < total_assigned_tasks and matrix_index < target_matrix_limit:
-            end_index = min(start_index + max_tasks_per_file, total_assigned_tasks)
+        # Loop until all assigned tasks are distributed OR matrix limit is reached
+        while start_index < assigned_task_count_total and matrix_index < target_matrix_limit:
+            # Determine the tasks for the current matrix file
+            end_index = min(start_index + actual_tasks_per_matrix, assigned_task_count_total)
             matrix_tasks = tasks_to_distribute[start_index:end_index]
 
-            if not matrix_tasks: 
-                break # Stop if no tasks left for this matrix
+            if not matrix_tasks:
+                break # Should not happen if assigned_task_count_total > 0, but safe check
 
             matrix_task_file = os.path.join(output_task_dir, f"matrix_{matrix_index}_tasks.json")
             try:
                 with open(matrix_task_file, "w") as f:
                     json.dump(matrix_tasks, f, indent=2)
 
-                assigned_task_count_total += len(matrix_tasks) # Should match total_assigned_tasks in the end
+                # assigned_task_count_total += len(matrix_tasks) # No, total is calculated before loop
                 print(f"矩阵 {matrix_index}: 分配了 {len(matrix_tasks)} 个任务，保存到 {matrix_task_file}")
                 task_matrices_for_strategy.append({"matrix_id": matrix_index})
-                matrix_index += 1 
+                matrix_index += 1
 
             except Exception as e:
                  print(f"错误: 无法写入任务文件 {matrix_task_file}: {e}")
-            
-            start_index = end_index # Move to the next chunk
-        
+
+            start_index = end_index # Move to the next chunk for the next matrix file
+
         actual_matrix_count = matrix_index # Final count is the number of files created
         print(f"\n总共分配了 {assigned_task_count_total} 个任务到 {actual_matrix_count} 个矩阵文件中 (在 '{output_task_dir}' 目录下)。")
 
@@ -283,7 +291,7 @@ def run_task_splitting(args):
              task_matrices_json = json.dumps(task_matrices_for_strategy)
              delimiter = "ghadelimiter_" + os.urandom(16).hex() # Use a random delimiter
              with open(github_output_file, 'a') as f: # Append to the output file
-                 f.write(f"total_tasks={total_assigned_tasks}\n")
+                 f.write(f"total_tasks={assigned_task_count_total}\n")
                  f.write(f"matrix_count={actual_matrix_count}\n")
                  # Use delimiter method for task_matrices JSON string
                  f.write(f"task_matrices<<{delimiter}\n")
@@ -297,7 +305,7 @@ def run_task_splitting(args):
         # Running locally, print to console
         print("\n--- 本地运行任务拆分总结 ---")
         print(f"总任务数 (Total Tasks Found): {total_needed_tasks}")
-        print(f"已分配任务数 (Assigned Tasks): {assigned_task_count_total}")
+        print(f"已分配任务数 (Assigned Tasks): {assigned_task_count_total}") # Use the final assigned count
         print(f"实际创建矩阵数 (Matrix Count): {actual_matrix_count}")
         print(f"矩阵策略信息 (Task Matrices for Strategy): {json.dumps(task_matrices_for_strategy)}")
         print("-----------------------------")

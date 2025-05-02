@@ -201,7 +201,7 @@ jobs:
           # REPO_ID is passed as argument
         run: |
           echo "Running merge and upload script..."
-          # Run the script on a single line
-          python script/merge_upload.py --repo-id "lyk/ArxivEmbedding" --artifacts-dir "artifacts"
-            
+          # Run the script on a single line, using the new merge.py
+          python script/merge.py --repo-id "lyk/ArxivEmbedding" --artifacts-dir "artifacts"
+
           echo "Merge and upload script finished."
