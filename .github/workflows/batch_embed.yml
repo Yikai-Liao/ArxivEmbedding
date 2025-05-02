@@ -176,7 +176,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install polars huggingface_hub tqdm loguru
+          pip install polars huggingface_hub tqdm loguru numpy
 
       - name: Download all matrix output artifacts
         uses: actions/download-artifact@v4
