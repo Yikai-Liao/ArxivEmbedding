@@ -274,10 +274,8 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          # Install base requirements + embedding libs
-          pip install -r requirements.txt
-          # Ensure embed, toml, tqdm, loguru, huggingface_hub are installed (some might be in requirements.txt)
-          pip install embed torch toml tqdm loguru huggingface_hub polars
+          # Install all dependencies, using the CPU index for PyTorch packages
+          pip install -r requirements.txt --index-url https://download.pytorch.org/whl/cpu
           # Add accelerate if using multi-gpu or specific optimizations
           # pip install accelerate
           # Add GPU specific libraries if using GPU runner
