@@ -53,6 +53,7 @@ jobs:
           import polars as pl
           from tqdm import tqdm
           from collections import defaultdict
+          import numpy as np # Import numpy for zero vector check
           
           # 获取需要处理的年份列表（如果有指定）
           target_years_input = os.environ.get('TARGET_YEARS', '').strip()
@@ -190,13 +191,30 @@ jobs:
                            needed_tasks.append({"id": id_value, "year_file": year_file, "model_key": model_key})
                            # print(f"  需要任务: {id_value} - {model_key} (列不存在)")
                        else:
-                           # Column exists, check if the value for this ID is null
+                           # Column exists, check if the value for this ID is null or zero vector
                            embedding_value = df_year.filter(pl.col("id") == id_value).select(pl.col(model_key)).item()
-                           # Polars returns None for null values in list columns when using item()
+                           
+                           # --- Updated Check --- 
+                           is_missing_or_zero = False
                            if embedding_value is None:
-                               needed_tasks.append({"id": id_value, "year_file": year_file, "model_key": model_key})
-                               # print(f"  需要任务: {id_value} - {model_key} (值为空)")
-                           # else: # Value exists, skip task
+                               is_missing_or_zero = True
+                               # print(f"  需要任务 (null): {id_value} - {model_key}")
+                           elif isinstance(embedding_value, (list, np.ndarray)): # Check if it's list-like
+                               try:
+                                   # Convert to numpy array if it's a list, then check if all elements are zero
+                                   if all(v == 0.0 for v in embedding_value):
+                                        is_missing_or_zero = True
+                                        # print(f"  需要任务 (zero): {id_value} - {model_key}")
+                               except TypeError:
+                                   # Handle cases where elements are not comparable to 0.0
+                                   print(f"  警告: 无法检查 {id_value} - {model_key} 的值是否为零向量 (类型错误)。假设不需要处理。")
+                                   pass # Assume it's not a zero vector if check fails
+                           # else: Value exists and is not list-like or not zero, skip task
+                           
+                           if is_missing_or_zero:
+                                needed_tasks.append({"id": id_value, "year_file": year_file, "model_key": model_key})
+                           # --- End Updated Check ---
+                           # else: # Value exists, skip task (covered by the logic above)
                            #     print(f"  跳过任务: {id_value} - {model_key} (值已存在)")
 
                    # Clean up downloaded file
@@ -582,10 +600,27 @@ jobs:
                            df_embed_subset = df_embed.select(['id', embed_col_name])
 
 
-                      # Perform the left join
-                      df_merged_before_join = df_merged.shape
-                      df_merged = df_merged.join(df_embed_subset, on='id', how='left')
-                      df_merged_after_join = df_merged.shape
+                      # --- Use update method for merging --- 
+                      # Ensure the embedding column exists in the main df before updating
+                      # (it should if the column adding logic in rss2hg worked)
+                      if embed_col_name not in df_merged.columns:
+                          logger.warning(f"目标列 '{embed_col_name}' 在 df_merged ({year_file}) 中不存在，将添加它。")
+                          # Add the column filled with zeros first if missing entirely
+                          model_dim = df_embed_subset[embed_col_name].list.eval(pl.element().count()).max().item() # Get dim from data
+                          if model_dim:
+                               zero_vec = np.zeros((model_dim,), dtype=np.float32)
+                               target_dtype = pl.Array(pl.Float32, model_dim)
+                               df_merged = df_merged.with_columns(pl.lit(zero_vec).cast(target_dtype).alias(embed_col_name))
+                               logger.info(f"为 {year_file} 添加了全零列 '{embed_col_name}'")
+                          else:
+                               logger.error(f"无法确定 '{embed_col_name}' 的维度以添加全零列。跳过更新。")
+                               continue
+
+                      logger.debug(f"使用 df.update() 合并 '{embed_col_name}' (来自 {embed_file}) 到 {year_file}...")
+                      # Update will modify df_merged in place based on matching 'id' and non-null values in df_embed_subset
+                      df_merged.update(df_embed_subset, on='id')
+                      df_merged_after_join = df_merged.shape # Shape shouldn't change with update
+                      # --- End update method ---
 
                       if df_merged_after_join[0] != df_merged_before_join[0]:
                           logger.warning(f"Join changed row count for {year_file} when merging {embed_col_name} (before: {df_merged_before_join[0]}, after: {df_merged_after_join[0]}). This might indicate duplicate IDs.")

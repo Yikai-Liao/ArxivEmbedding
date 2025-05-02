@@ -105,42 +105,70 @@ def generate_embeddings_batch_embed(register: BatchedInference, model_id: str, t
                 batch_embeddings_list, token_usage = future.result()
 
                 # Ensure embeddings are float32 numpy arrays
-                batch_embeddings_np = [np.array(emb, dtype=np.float32) for emb in batch_embeddings_list]
+                # This might still produce zero-size arrays if embed returns []
+                batch_embeddings_np_raw = [np.array(emb, dtype=np.float32) for emb in batch_embeddings_list]
+
+                # Check for zero-sized arrays and inconsistent dimensions
+                batch_embeddings_np = []
+                embedding_dim = None
+                # First pass to determine expected dimension from valid embeddings
+                for emb_np in batch_embeddings_np_raw:
+                    if emb_np.size > 0:
+                        embedding_dim = emb_np.shape[0]
+                        break
+                # If no valid embeddings found, try from history or default
+                if embedding_dim is None:
+                    if all_embeddings and all_embeddings[-1] is not None and not np.isnan(all_embeddings[-1]).all():
+                        embedding_dim = all_embeddings[-1].shape[0]
+                        logger.debug(f"Determined expected dimension {embedding_dim} from previous batches.")
+                    else:
+                        # Attempt to get from model config or use a reasonable default
+                        # This part is tricky with BatchedInference, using 1024 as a common default.
+                        # Ideally, get_model_info_from_config could provide this.
+                        embedding_dim = 1024 # Default to 1024, adjust if other models used
+                        logger.warning(f"Could not determine embedding dimension from batch or history. Using default: {embedding_dim}")
+
+                # Second pass to correct or replace invalid embeddings
+                for i, emb_np in enumerate(batch_embeddings_np_raw):
+                    current_original_index = pbar.n + i # Index in the original texts list
+                    if emb_np.size == 0:
+                        logger.warning(f"Detected zero-size embedding for text at original index {current_original_index}. Replacing with NaN vector (dim={embedding_dim}).")
+                        nan_vector = np.full((embedding_dim,), np.nan, dtype=np.float32)
+                        batch_embeddings_np.append(nan_vector)
+                    elif emb_np.shape[0] != embedding_dim:
+                        logger.warning(f"Inconsistent embedding dimension detected ({emb_np.shape[0]} vs {embedding_dim}) for text at original index {current_original_index}. Replacing with NaN vector.")
+                        nan_vector = np.full((embedding_dim,), np.nan, dtype=np.float32)
+                        batch_embeddings_np.append(nan_vector)
+                    else:
+                        batch_embeddings_np.append(emb_np)
 
                 if len(batch_embeddings_np) != count:
-                    logger.warning(f"Mismatch in expected ({count}) vs received ({len(batch_embeddings_np)}) embeddings for batch starting at index {i}. Padding with NaNs.")
-                    # Pad with NaN vectors if necessary
-                    if batch_embeddings_np:
-                        embedding_dim = batch_embeddings_np[0].shape[0]
-                        logger.debug(f"Determined embedding dimension for padding: {embedding_dim}")
-                    else:
-                        # Need to get dim from model if first batch failed completely
-                        # This is hard with BatchedInference. Use a placeholder.
-                        # TODO: Find a way to get embedding dim from BatchedInference if possible
-                        embedding_dim = 768 # Placeholder, adjust if needed
-                        logger.warning(f"Could not determine embedding dimension for padding. Using placeholder {embedding_dim}.")
-
+                    logger.warning(f"Mismatch in expected ({count}) vs processed ({len(batch_embeddings_np)}) embeddings for batch starting at original index {pbar.n}. Padding with NaNs.")
+                    # Pad with NaN vectors if necessary, using the determined dimension
                     nan_vector = np.full((embedding_dim,), np.nan, dtype=np.float32)
                     while len(batch_embeddings_np) < count:
                         batch_embeddings_np.append(nan_vector)
 
                 all_embeddings.extend(batch_embeddings_np)
-                processed_count += len(batch_embeddings_np) # Use actual received count
+                processed_count += count # Count based on input texts for this batch
                 pbar.update(count) # Update progress bar by expected count
 
             except Exception as e:
-                logger.error(f"Error processing embedding batch result: {e}. Filling {count} entries with NaNs.", exc_info=True)
-                # Handle errors by adding NaN vectors
-                embedding_dim = 768 # Placeholder dimension
+                logger.error(f"Error processing embedding batch result (starting at original index {pbar.n}): {e}. Filling {count} entries with NaNs.", exc_info=True)
+                # Handle errors by adding NaN vectors using determined dimension
+                embedding_dim_exc = 1024 # Default
                 try:
-                     # If previous batches succeeded, try to get dim from there
-                     if all_embeddings and all_embeddings[-1] is not None and not np.isnan(all_embeddings[-1]).all():
-                         embedding_dim = all_embeddings[-1].shape[0]
-                         logger.debug(f"Using embedding dimension {embedding_dim} from previous result for NaN padding.")
+                    # If previous batches succeeded, try to get dim from there
+                    if all_embeddings and all_embeddings[-1] is not None and not np.isnan(all_embeddings[-1]).all():
+                        embedding_dim_exc = all_embeddings[-1].shape[0]
+                        logger.debug(f"Using embedding dimension {embedding_dim_exc} from previous result for NaN padding in exception.")
+                    elif embedding_dim: # Use dim determined earlier if available
+                         embedding_dim_exc = embedding_dim
+                         logger.debug(f"Using embedding dimension {embedding_dim_exc} determined earlier for NaN padding in exception.")
                 except Exception as dim_err:
-                    logger.warning(f"Could not get embedding dimension for NaN padding: {dim_err}. Using placeholder {embedding_dim}.")
+                    logger.warning(f"Could not get embedding dimension for NaN padding in exception: {dim_err}. Using placeholder {embedding_dim_exc}.")
 
-                nan_vector = np.full((embedding_dim,), np.nan, dtype=np.float32)
+                nan_vector = np.full((embedding_dim_exc,), np.nan, dtype=np.float32)
                 all_embeddings.extend([nan_vector] * count)
                 processed_count += count # Still count these as processed (with errors)
                 pbar.update(count)
@@ -150,10 +178,12 @@ def generate_embeddings_batch_embed(register: BatchedInference, model_id: str, t
     # Final check and padding - should ideally not be needed if batch padding works
     if len(all_embeddings) != total_texts:
         logger.error(f"FINAL MISMATCH: Expected {total_texts}, got {len(all_embeddings)}. Check logs for errors. Padding remaining...")
-        embedding_dim = 768 # Placeholder
-        if all_embeddings and all_embeddings[-1] is not None and not np.isnan(all_embeddings[-1]).all():
-            embedding_dim = all_embeddings[-1].shape[0]
-        nan_vector = np.full((embedding_dim,), np.nan, dtype=np.float32)
+        embedding_dim_final = 1024 # Default
+        if embedding_dim: # Use determined dim if available
+            embedding_dim_final = embedding_dim
+        elif all_embeddings and all_embeddings[-1] is not None and not np.isnan(all_embeddings[-1]).all():
+            embedding_dim_final = all_embeddings[-1].shape[0]
+        nan_vector = np.full((embedding_dim_final,), np.nan, dtype=np.float32)
         while len(all_embeddings) < total_texts:
             all_embeddings.append(nan_vector)
 
