@@ -213,37 +213,56 @@ def run_task_splitting(args):
     actual_matrix_count = 0
     task_matrices_for_strategy = []
     assigned_task_count_total = 0
-    max_tasks_per_file = args.max_tasks_per_matrix # Get limit from args
+    max_tasks_per_file = args.max_tasks_per_matrix # Limit per file
+    target_matrix_limit = args.matrix_count # Total number of matrices to create
 
     if total_needed_tasks > 0:
         os.makedirs(output_task_dir, exist_ok=True)
-        tasks_to_distribute = needed_tasks
-        random.shuffle(tasks_to_distribute) # Shuffle before distributing
+        
+        # Shuffle all potential tasks first
+        random.shuffle(needed_tasks) 
 
-        print(f"将 {total_needed_tasks} 个任务分配到矩阵文件中，每个文件最多包含 {max_tasks_per_file} 个任务...")
+        # Determine the maximum number of tasks to actually assign based on limits
+        max_assignable_tasks = target_matrix_limit * max_tasks_per_file
+        
+        # Select the subset of tasks to distribute for this run
+        tasks_to_distribute = needed_tasks[:max_assignable_tasks]
+        total_assigned_tasks = len(tasks_to_distribute)
 
+        print(f"总共找到 {total_needed_tasks} 个任务，根据限制 (最多 {target_matrix_limit} 个矩阵，每个最多 {max_tasks_per_file} 个任务)，本次运行将分配 {total_assigned_tasks} 个任务。")
+
+        # Write the *selected* tasks to the summary file
+        summary_file_path = os.path.join(output_task_dir, "all_tasks_info.json")
+        try:
+             with open(summary_file_path, "w") as f:
+                 json.dump(tasks_to_distribute, f, indent=2)
+             print(f"已将分配的 {total_assigned_tasks} 个任务信息写入到 {summary_file_path}")
+        except Exception as e:
+             print(f"错误: 无法写入任务摘要文件 {summary_file_path}: {e}")
+             # Continue distribution even if summary write fails?
+
+        # Distribute the selected tasks into matrix files
         matrix_index = 0
         start_index = 0
-        while start_index < total_needed_tasks:
-            end_index = min(start_index + max_tasks_per_file, total_needed_tasks)
+        while start_index < total_assigned_tasks and matrix_index < target_matrix_limit:
+            end_index = min(start_index + max_tasks_per_file, total_assigned_tasks)
             matrix_tasks = tasks_to_distribute[start_index:end_index]
 
-            if not matrix_tasks: # Should not happen in while loop, but good practice
-                break
+            if not matrix_tasks: 
+                break # Stop if no tasks left for this matrix
 
             matrix_task_file = os.path.join(output_task_dir, f"matrix_{matrix_index}_tasks.json")
             try:
                 with open(matrix_task_file, "w") as f:
                     json.dump(matrix_tasks, f, indent=2)
 
-                assigned_task_count_total += len(matrix_tasks)
+                assigned_task_count_total += len(matrix_tasks) # Should match total_assigned_tasks in the end
                 print(f"矩阵 {matrix_index}: 分配了 {len(matrix_tasks)} 个任务，保存到 {matrix_task_file}")
                 task_matrices_for_strategy.append({"matrix_id": matrix_index})
-                matrix_index += 1 # Increment for next matrix file
+                matrix_index += 1 
 
             except Exception as e:
                  print(f"错误: 无法写入任务文件 {matrix_task_file}: {e}")
-                 # Decide if we should stop or continue? Let's continue for now.
             
             start_index = end_index # Move to the next chunk
         
@@ -263,7 +282,7 @@ def run_task_splitting(args):
              # Ensure task_matrices is valid JSON (it should be)
              task_matrices_json = json.dumps(task_matrices_for_strategy)
              with open(github_output_file, 'a') as f: # Append to the output file
-                 f.write(f"total_tasks={total_needed_tasks}\\n")
+                 f.write(f"total_tasks={total_assigned_tasks}\\n")
                  f.write(f"matrix_count={actual_matrix_count}\\n")
                  # Make sure the JSON string doesn't contain newlines that break the format
                  f.write(f"task_matrices={task_matrices_json}\\n") 
@@ -274,7 +293,8 @@ def run_task_splitting(args):
     else:
         # Running locally, print to console
         print("\n--- 本地运行任务拆分总结 ---")
-        print(f"总任务数 (Total Tasks): {total_needed_tasks}")
+        print(f"总任务数 (Total Tasks Found): {total_needed_tasks}")
+        print(f"已分配任务数 (Assigned Tasks): {assigned_task_count_total}")
         print(f"实际创建矩阵数 (Matrix Count): {actual_matrix_count}")
         print(f"矩阵策略信息 (Task Matrices for Strategy): {json.dumps(task_matrices_for_strategy)}")
         print("-----------------------------")
