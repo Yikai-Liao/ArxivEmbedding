@@ -18,9 +18,9 @@ jobs:
   list_files_and_create_tasks:
     runs-on: ubuntu-latest
     outputs:
-      task_matrices: ${{ steps.create_task_matrices.outputs.task_matrices }}
-      matrix_count: ${{ steps.create_task_matrices.outputs.matrix_count }}
-      total_tasks: ${{ steps.create_task_matrices.outputs.total_tasks }}
+      task_matrices: ${{ steps.list_files.outputs.task_matrices }}
+      matrix_count: ${{ steps.list_files.outputs.matrix_count }}
+      total_tasks: ${{ steps.list_files.outputs.total_tasks }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -36,242 +36,36 @@ jobs:
           # 只安装必要的依赖用于任务拆分，不包含torch和embed等重型依赖
           pip install huggingface_hub polars toml numpy tqdm
 
-      - name: List Parquet files, Models and Create Task Matrices
-        id: create_task_matrices
+      - name: List files, check embeddings, and create task matrices
+        id: list_files
         env:
-          HF_TOKEN: ${{ secrets.HUGGINGFACE_TOKEN }} # Needs repo write access
-          REPO_ID: lyk/ArxivEmbedding # Your dataset ID
-          MATRIX_COUNT: ${{ github.event.inputs.matrix_count || 20 }} # 使用输入参数设置矩阵数量，默认20
-          TARGET_YEARS: ${{ github.event.inputs.years }}
-        run: |
-          import os
-          import sys
-          from huggingface_hub import HfApi, hf_hub_download
-          import toml
-          import json
-          import math
-          import polars as pl
-          from tqdm import tqdm
-          from collections import defaultdict
-          import numpy as np # Import numpy for zero vector check
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          REPO_ID: ${{ inputs.repo_id || 'lyk/ArxivEmbedding' }}
+          MATRIX_COUNT: ${{ inputs.matrix_count || 10 }}
+          TARGET_YEARS: ${{ inputs.target_years || '' }} # Pass target years, default to empty string
+          CONFIG_FILE: config.toml
+          OUTPUT_DIR: matrix_tasks # Directory for task files
+          THRESHOLD: 1e-7 # Keep threshold consistent if needed, though script has it hardcoded now
+        run: | # Replace python shell with standard run block
+          echo "Running task splitting script..."
+          # Ensure output directory exists (script does this too, but good practice)
+          mkdir -p $OUTPUT_DIR
           
-          # 获取需要处理的年份列表（如果有指定）
-          target_years_input = os.environ.get('TARGET_YEARS', '').strip()
-          target_years = []
-          if target_years_input:
-              target_years = [year.strip() for year in target_years_input.split(',')]
-              print(f"用户指定处理的年份: {target_years}")
-          
-          # List files from Hub
-          api = HfApi()
-          repo_id = os.environ['REPO_ID']
-          repo_files = api.list_repo_files(repo_id=repo_id, repo_type='dataset')
-          year_files = [f for f in repo_files if f.endswith('.parquet') and f[:-len('.parquet')].isdigit()]
-          
-          if target_years:
-              year_files = [f for f in year_files if any(year in f for year in target_years)]
-              
-          print(f"Found yearly files to process: {year_files}")
-          
-          # 解析配置文件中的模型和维度
-          config = toml.load("config.toml")
-          embedding_configs = config.get("Embedding", {})
-          model_dims = {k: v.get("dimension") for k, v in embedding_configs.items() if isinstance(v, dict) and "dimension" in v}
-          model_keys = list(model_dims.keys())
-          
-          if not model_keys:
-              print("错误: 无法从config.toml中找到带有维度的模型配置。")
-              sys.exit(1)
-          
-          print(f"Found model keys with dimensions: {model_dims}")
-          
-          # --- Efficient Task Checking using Polars ---
-          needed_tasks = []
-          total_potential_tasks = 0
-          threshold = 1e-7 # Tolerance for zero check
-          
-          print(f"开始检查文件并使用 Polars 表达式筛选任务 (阈值: {threshold})...")
-          
-          for year_file in tqdm(year_files, desc="检查年份文件"):
-              file_path = None
-              try:
-                  print(f"检查文件: {year_file}")
-                  file_path = hf_hub_download(
-                      repo_id=repo_id,
-                      filename=year_file,
-                      repo_type="dataset",
-                      local_dir=".",
-                  )
-                  
-                  df_year = pl.read_parquet(file_path)
-                  schema = df_year.schema
-                  print(f"  文件 {year_file} schema: {list(schema.keys())}")
-                  total_potential_tasks += df_year.height * len(model_keys) # Rough estimate
-                  
-                  # Iterate through each model we need embeddings for
-                  for model_key, expected_dim in model_dims.items():
-                      print(f"  检查模型: {model_key}")
-                      
-                      # Case 1: Column doesn't exist -> All IDs for this model are tasks
-                      if model_key not in schema:
-                          print(f"    列 '{model_key}' 不存在，将所有 {df_year.height} 个 ID 添加到任务列表。")
-                          tasks_for_model = [{"id": row_id, "year_file": year_file, "model_key": model_key}
-                                             for row_id in df_year.get_column("id").to_list()]
-                          needed_tasks.extend(tasks_for_model)
-                          continue # Move to the next model
-                      
-                      # Case 2: Column exists, check for null or near-zero vectors
-                      try:
-                           # Define the filter condition using Polars expressions
-                           is_null_expr = pl.col(model_key).is_null()
-                           
-                           # --- Corrected near-zero expression --- 
-                           # Directly try list evaluation. fill_null(False) handles non-list types 
-                           # or rows where list eval results in null.
-                           is_near_zero_expr = (
-                               pl.col(model_key).list.eval(
-                                   pl.element().abs() < threshold
-                               ).list.all()
-                               .fill_null(False) # Treat null results (e.g. non-list rows) as False
-                           )
-                           # --- End Corrected near-zero expression ---
-                           
-                           # --- DEBUGGING START --- 
-                           # Calculate counts for each condition separately
-                           null_count = df_year.filter(is_null_expr).height
-                           # Only check near-zero for non-null rows. The is_near_zero_expr handles type internally.
-                           near_zero_count = df_year.filter(is_near_zero_expr & (~is_null_expr)).height
-                           print(f"    调试: 模型 '{model_key}' - Null count: {null_count}")
-                           print(f"    调试: 模型 '{model_key}' - Near-zero count (checked on non-null list/array): {near_zero_count}")
-                           # --- DEBUGGING END --- 
-                           
-                           # Combine conditions: null OR near-zero
-                           filter_condition = is_null_expr | is_near_zero_expr
-                           
-                           # Apply the filter and select the IDs
-                           ids_to_process_df = df_year.filter(filter_condition).select("id")
-                           ids_to_process = ids_to_process_df.get_column("id").to_list()
-                           
-                           count = len(ids_to_process)
-                           if count > 0:
-                               print(f"    发现 {count} 个需要处理的任务 (null 或 near-zero vector)。")
-                               tasks_for_model = [{"id": row_id, "year_file": year_file, "model_key": model_key}
-                                                  for row_id in ids_to_process]
-                               needed_tasks.extend(tasks_for_model)
-                           else:
-                                print(f"    所有行的 '{model_key}' 向量都已存在且非零。")
-                                # --- DEBUGGING START: Inspect non-zero rows --- 
-                                try:
-                                     # Select rows that were *not* filtered out (should be non-null and not near-zero)
-                                     not_processed_df = df_year.filter(~filter_condition).select(['id', model_key])
-                                     sample_size = min(5, not_processed_df.height) # Show up to 5 samples
-                                     if sample_size > 0:
-                                         print(f"    调试: 抽查 {sample_size} 个未被处理的 '{model_key}' 行:")
-                                         sample_df = not_processed_df.sample(n=sample_size, seed=42) # Use seed for reproducibility
-                                         for row in sample_df.iter_rows(named=True):
-                                             row_id = row['id']
-                                             value = row[model_key]
-                                             if isinstance(value, (list, np.ndarray)):
-                                                  value_preview = str(np.array(value[:5])) + "..." # Show first 5 elements
-                                                  value_sum = np.sum(value)
-                                                  print(f"      - ID: {row_id}, Value Preview: {value_preview}, Sum: {value_sum:.4e}")
-                                             else:
-                                                  print(f"      - ID: {row_id}, Value: {value} (Type: {type(value)})")
-                                except Exception as debug_err:
-                                     print(f"    调试: 抽查未处理行时出错: {debug_err}")
-                                # --- DEBUGGING END --- 
-                                
-                      except Exception as filter_err:
-                           print(f"    处理模型 '{model_key}' 的筛选条件时出错: {filter_err}。将假设所有任务都需要处理。")
-                           # Fallback: Add all IDs for this model if filtering fails
-                           tasks_for_model = [{"id": row_id, "year_file": year_file, "model_key": model_key}
-                                              for row_id in df_year.get_column("id").to_list()]
-                           needed_tasks.extend(tasks_for_model)
-                  
-                  # Clean up downloaded file
-                  if file_path and os.path.exists(file_path):
-                      os.remove(file_path)
-                  
-              except Exception as e:
-                  print(f"检查 {year_file} 时发生严重错误: {e}。将跳过此文件。")
-                  # Attempt cleanup even on error
-                  if file_path and os.path.exists(file_path):
-                      try: os.remove(file_path)
-                      except OSError: pass
-          
-          # --- End Efficient Task Checking ---
-          
-          total_needed_tasks = len(needed_tasks)
-          print(f"检查完成。总潜在任务数 (估算): {total_potential_tasks}。实际需要处理的任务数: {total_needed_tasks}")
-           
-          # 根据矩阵数量均匀分配ID
-          target_matrix_count = int(os.environ['MATRIX_COUNT'])
-          if total_needed_tasks == 0:
-               actual_matrix_count = 0 # No tasks, no matrices
-               print("警告：没有找到任何需要处理的任务。")
-          else:
-              tasks_per_matrix = math.ceil(total_needed_tasks / target_matrix_count)
-              tasks_per_matrix = max(1, tasks_per_matrix)
-              actual_matrix_count = math.ceil(total_needed_tasks / tasks_per_matrix)
-              actual_matrix_count = min(target_matrix_count, actual_matrix_count)
-              actual_matrix_count = max(1, actual_matrix_count)
-              tasks_per_matrix = math.ceil(total_needed_tasks / actual_matrix_count)
-              print(f"总任务数: {total_needed_tasks}。目标矩阵数: {target_matrix_count}。实际使用矩阵数: {actual_matrix_count}。计算得到每个矩阵约处理: {tasks_per_matrix} 个任务。")
+          # Execute the script. It will now set the outputs directly if running in Actions.
+          python script/local_split_tasks.py \\
+            --repo-id "$REPO_ID" \\
+            --matrix-count "$MATRIX_COUNT" \\
+            --years "$TARGET_YEARS" \\
+            --config-file "$CONFIG_FILE" \\
+            --output-dir "$OUTPUT_DIR" \\
+            --max-tasks-per-matrix 10
+            
+          # Script's stdout/stderr will still be printed for logging.
+          # No need for manual parsing or setting outputs here anymore.
+          echo "Task splitting script finished. Outputs should be set directly."
 
-          task_matrices_for_strategy = []
-          if actual_matrix_count > 0:
-              os.makedirs("matrix_tasks", exist_ok=True)
-              assigned_task_count_total = 0
-              tasks_to_distribute = needed_tasks
-              import random # Shuffle for potentially better distribution if needed later
-              random.shuffle(tasks_to_distribute)
-
-              for i in range(actual_matrix_count):
-                  start_idx = i * tasks_per_matrix
-                  end_idx = min(start_idx + tasks_per_matrix, total_needed_tasks)
-                  matrix_tasks = tasks_to_distribute[start_idx:end_idx]
-                  if not matrix_tasks: # Should not happen with ceil, but safety check
-                       break
-
-                  matrix_task_file = f"matrix_tasks/matrix_{i}_tasks.json"
-                  with open(matrix_task_file, "w") as f:
-                      json.dump(matrix_tasks, f)
-                  
-                  assigned_task_count_total += len(matrix_tasks)                  
-                  print(f"矩阵 {i}: 分配了 {len(matrix_tasks)} 个任务 (从索引 {start_idx} 到 {end_idx-1})，保存到 {matrix_task_file}")
-                  task_matrices_for_strategy.append({"matrix_id": i})
-
-                  # Stop assigning if we've run out of tasks (shouldn't happen with ceil division)
-                  if end_idx >= total_needed_tasks:
-                      break 
-              
-              # Recalculate actual_matrix_count based on how many matrices actually got tasks
-              # This handles the edge case where the calculation might slightly overestimate due to ceil
-              actual_matrix_count = len(task_matrices_for_strategy)
-              print(f"总共分配了 {assigned_task_count_total} 个任务到 {actual_matrix_count} 个矩阵文件中。")
-
-          # 输出到GitHub Actions
-          task_matrices_json = json.dumps(task_matrices_for_strategy)
-          matrix_count = actual_matrix_count
-
-          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
-              f.write(f"task_matrices={task_matrices_json}\n")
-              f.write(f"total_tasks={total_needed_tasks}\n")
-              f.write(f"matrix_count={matrix_count}\n")
-          
-          # 上传任务信息 (optional, for debugging)
-          with open("all_tasks_info.json", "w") as f:
-              all_tasks_info = {
-                  "total_potential_tasks": total_potential_tasks, # Note: this is an estimate now
-                  "total_tasks": total_needed_tasks,
-                  "target_matrices_requested": target_matrix_count,
-                  "actual_matrices_created": actual_matrix_count
-              }
-              json.dump(all_tasks_info, f)
-        shell: python # Use python shell directly
-          
       - name: Upload individual task files
-        if: steps.create_task_matrices.outputs.matrix_count > 0 # Only upload if matrices were created
+        if: steps.list_files.outputs.matrix_count > 0 # Only upload if matrices were created
         uses: actions/upload-artifact@v4
         with:
           name: matrix-tasks # A single artifact containing all task files
@@ -408,215 +202,14 @@ jobs:
           echo "Found the following embedded files:"
           ls -la all_embedded_files/
 
-      - name: Merge Embeddings and Upload
+      - name: Merge Embeddings and Upload Script
         env:
-          HF_TOKEN: ${{ secrets.HUGGINGFACE_TOKEN }}
-          REPO_ID: lyk/ArxivEmbedding
+          HF_TOKEN: ${{ secrets.HUGGINGFACE_TOKEN }} # Pass token as env var
+          # REPO_ID is passed as argument
         run: |
-          import os
-          import glob
-          import polars as pl
-          from huggingface_hub import HfApi, hf_hub_download, upload_file
-          from tqdm import tqdm
-          from loguru import logger
-          import re
-
-          repo_id = os.environ['REPO_ID']
-          api = HfApi()
-
-          # Identify unique year files from the embedded file patterns
-          embedded_files = glob.glob("all_embedded_files/embedded-*.parquet")
-          year_files_to_process = set()
-          
-          # Extract year from filenames like embedded-2020.parquet-model_key.parquet
-          for file_path in embedded_files:
-              filename = os.path.basename(file_path)
-              # Extract the original year file name
-              match = re.search(r'embedded-([0-9]+\.parquet)', filename)
-              if match:
-                  year_file = match.group(1)
-                  year_files_to_process.add(year_file)
-
-          logger.info(f"Found year files to process: {year_files_to_process}")
-
-          for year_file in tqdm(list(year_files_to_process), desc="Merging and Uploading Years"):
-              logger.info(f"--- Processing {year_file} ---")
-              local_final_path = f"final_{year_file}"
-              
-              # Find all embedding files for this year
-              embedding_files = [f for f in embedded_files if f"embedded-{year_file}-" in os.path.basename(f)]
-              
-              if not embedding_files:
-                  logger.warning(f"No embedding artifacts found for {year_file}. Skipping.")
-                  continue
-
-              # Download the original file from the Hub to merge into
-              try:
-                  logger.info(f"Downloading original {year_file} from Hub...")
-                  original_file_path = hf_hub_download(repo_id=repo_id, filename=year_file, repo_type='dataset', local_dir='.')
-                  logger.info(f"Loading original file: {original_file_path}")
-                  # Ensure 'id' column is read as string/object if necessary
-                  # Let Polars infer for now, but be mindful if IDs cause issues
-                  df_merged = pl.read_parquet(original_file_path)
-                  logger.info(f"Original {year_file} shape: {df_merged.shape}")
-                  
-                  # Store original columns and dtypes for later verification
-                  original_schema = df_merged.schema
-                  logger.debug(f"Original schema: {original_schema}")
-
-                  # Ensure the 'id' column exists
-                  if 'id' not in df_merged.columns:
-                      logger.error(f"Original file {year_file} is missing the required 'id' column. Skipping merge.")
-                      if os.path.exists(original_file_path):
-                           os.remove(original_file_path)
-                      continue # Skip to the next year file
-
-                  os.remove(original_file_path) # Clean up downloaded original
-              except Exception as e:
-                  logger.error(f"Failed to download or load original {year_file} from Hub: {e}. Skipping merge for this year.")
-                  # Clean up potentially downloaded file if path exists
-                  if 'original_file_path' in locals() and os.path.exists(original_file_path):
-                      try:
-                          os.remove(original_file_path)
-                      except OSError:
-                           pass # Ignore error if removal fails (e.g., file not found)
-                  continue
-
-              # Merge embedding columns from artifacts
-              merged_cols_count = 0
-              processed_ids_for_year = set() # Track IDs processed in this year's merge
-
-              for embed_file in embedding_files:
-                  try:
-                      logger.debug(f"Loading embedding file: {embed_file}")
-                      df_embed = pl.read_parquet(embed_file)
-                      logger.debug(f"Embedding file {embed_file} shape: {df_embed.shape}, columns: {df_embed.columns}")
-
-                      # Ensure 'id' column exists in embedding file
-                      if 'id' not in df_embed.columns:
-                          logger.warning(f"Embedding file {embed_file} is missing 'id' column. Skipping.")
-                          continue
-
-                      # Find the embedding column (assume it's the model_key used in the filename or the only non-'id' column)
-                      potential_embed_cols = [col for col in df_embed.columns if col != 'id']
-
-                      if not potential_embed_cols:
-                          logger.warning(f"No potential embedding columns (other than 'id') found in {embed_file}. Skipping file.")
-                          continue
-
-                      # Heuristic: Assume the first non-'id' column is the embedding column
-                      # Or better: extract model key from filename if possible
-                      embed_col_name = None
-                      model_match = re.search(r'embedded-.*?-([a-zA-Z0-9_.-]+)\.parquet$', os.path.basename(embed_file))
-                      if model_match:
-                           extracted_model_key = model_match.group(1)
-                           if extracted_model_key in df_embed.columns:
-                               embed_col_name = extracted_model_key
-                               logger.debug(f"Identified embedding column '{embed_col_name}' from filename {embed_file}")
-                           else:
-                               logger.warning(f"Extracted model key '{extracted_model_key}' not found as column in {embed_file}. Falling back to heuristic.")
-
-                      if not embed_col_name:
-                           if len(potential_embed_cols) == 1:
-                               embed_col_name = potential_embed_cols[0]
-                               logger.debug(f"Using the only non-id column '{embed_col_name}' as embedding column from {embed_file}")
-                           else:
-                               logger.warning(f"Could not reliably determine the embedding column in {embed_file} (found: {potential_embed_cols}). Skipping file.")
-                               continue
-
-                      # Check if this embedding column should actually be merged
-                      if embed_col_name in df_merged.columns:
-                           logger.warning(f"Column '{embed_col_name}' already exists in the merged DataFrame for {year_file}. Skipping merge from {embed_file}.")
-                           continue # Skip this file as the column exists
-
-                      logger.debug(f"Attempting to merge column '{embed_col_name}' from {embed_file}")
-
-                      # Select only id and the embedding column
-                      # Ensure 'id' type matches the main dataframe if possible
-                      try:
-                          target_id_type = df_merged['id'].dtype
-                          df_embed_subset = df_embed.select(['id', embed_col_name]).with_columns(pl.col('id').cast(target_id_type))
-                      except Exception as cast_err:
-                           logger.warning(f"Could not cast 'id' column in {embed_file} to match target type {target_id_type}. Proceeding with original type. Error: {cast_err}")
-                           df_embed_subset = df_embed.select(['id', embed_col_name])
-
-
-                      # --- Use update method for merging --- 
-                      # Ensure the embedding column exists in the main df before updating
-                      # (it should if the column adding logic in rss2hg worked)
-                      if embed_col_name not in df_merged.columns:
-                          logger.warning(f"目标列 '{embed_col_name}' 在 df_merged ({year_file}) 中不存在，将添加它。")
-                          # Add the column filled with zeros first if missing entirely
-                          model_dim = df_embed_subset[embed_col_name].list.eval(pl.element().count()).max().item() # Get dim from data
-                          if model_dim:
-                               zero_vec = np.zeros((model_dim,), dtype=np.float32)
-                               target_dtype = pl.Array(pl.Float32, model_dim)
-                               df_merged = df_merged.with_columns(pl.lit(zero_vec).cast(target_dtype).alias(embed_col_name))
-                               logger.info(f"为 {year_file} 添加了全零列 '{embed_col_name}'")
-                          else:
-                               logger.error(f"无法确定 '{embed_col_name}' 的维度以添加全零列。跳过更新。")
-                               continue
-
-                      logger.debug(f"使用 df.update() 合并 '{embed_col_name}' (来自 {embed_file}) 到 {year_file}...")
-                      # Update will modify df_merged in place based on matching 'id' and non-null values in df_embed_subset
-                      df_merged.update(df_embed_subset, on='id')
-                      df_merged_after_join = df_merged.shape # Shape shouldn't change with update
-                      # --- End update method ---
-
-                      if df_merged_after_join[0] != df_merged_before_join[0]:
-                          logger.warning(f"Join changed row count for {year_file} when merging {embed_col_name} (before: {df_merged_before_join[0]}, after: {df_merged_after_join[0]}). This might indicate duplicate IDs.")
-                          # Optional: Add check here to revert or handle duplicates if necessary
-
-                      # Verify the column was added
-                      if embed_col_name in df_merged.columns:
-                           null_count = df_merged[embed_col_name].is_null().sum()
-                           logger.info(f"Merged column '{embed_col_name}' ({df_merged_after_join[1]} total columns). Null count: {null_count}/{df_merged_after_join[0]}.")
-                           merged_cols_count += 1
-                           # Track processed IDs for this specific merge
-                           processed_ids_for_year.update(df_embed_subset['id'].unique().to_list())
-                      else:
-                           logger.error(f"Column '{embed_col_name}' was NOT added after the join operation from {embed_file}. Shape after join: {df_merged_after_join}")
-
-
-                  except Exception as e:
-                      logger.error(f"Failed to process or merge embedding file {embed_file}: {e}", exc_info=True)
-
-              # After merging all files for the year
-              if merged_cols_count > 0:
-                  # Final check on shape and schema
-                  logger.info(f"Finished merging for {year_file}. Final shape: {df_merged.shape}. Merged {merged_cols_count} new columns.")
-                  logger.debug(f"Final schema for {year_file}: {df_merged.schema}")
-                  
-                  # Optional: Validate that original columns still exist and types match
-                  for col_name, col_type in original_schema.items():
-                       if col_name not in df_merged.columns:
-                            logger.error(f"Validation Error: Original column '{col_name}' missing in final merged data for {year_file}!")
-                       elif df_merged[col_name].dtype != col_type:
-                            logger.warning(f"Validation Warning: Original column '{col_name}' dtype changed in final merged data for {year_file} (original: {col_type}, final: {df_merged[col_name].dtype}).")
-
-
-                  # Save locally before upload
-                  try:
-                      logger.info(f"Saving final merged file locally: {local_final_path}")
-                      df_merged.write_parquet(local_final_path, compression='zstd')
-
-                      # Upload the final merged file
-                      logger.info(f"Uploading final {year_file} to Hub...")
-                      upload_file(
-                          path_or_fileobj=local_final_path,
-                          path_in_repo=year_file, # Overwrite the file in the repo root
-                          repo_id=repo_id,
-                          repo_type="dataset",
-                          commit_message=f"Add/Update embeddings for {year_file}"
-                      )
-                      logger.info(f"Successfully uploaded updated {year_file}.")
-                  except Exception as e:
-                      logger.error(f"Failed to save or upload final {year_file}: {e}")
-                  finally:
-                      if os.path.exists(local_final_path):
-                          os.remove(local_final_path) # Clean up local final file
-              else:
-                  logger.warning(f"No new embedding columns were merged for {year_file}. Nothing to upload.")
-
-          logger.info("--- Merge and Upload Job Finished ---")
-        shell: python
+          echo "Running merge and upload script..."
+          python script/merge_upload.py \
+            --repo-id "lyk/ArxivEmbedding" \
+            --artifacts-dir "artifacts" # Default dir where artifacts are downloaded
+            
+          echo "Merge and upload script finished."
