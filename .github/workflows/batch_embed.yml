@@ -124,19 +124,17 @@ jobs:
                       try:
                            # Define the filter condition using Polars expressions
                            is_null_expr = pl.col(model_key).is_null()
-                           # Check if it's Array type first to avoid errors on non-list columns
-                           # Use .meta.eq instead of | for dtype checking if Polars version allows
-                           is_list_or_array_expr = pl.col(model_key).dtype.is_list() | pl.col(model_key).dtype.is_array() 
                            
+                           # --- Corrected near-zero expression --- 
+                           # Directly try list evaluation. fill_null(False) handles non-list types 
+                           # or rows where list eval results in null.
                            is_near_zero_expr = (
-                                pl.when(is_list_or_array_expr)
-                                .then(
-                                    pl.col(model_key).list.eval( 
-                                        pl.element().abs() < threshold 
-                                    ).list.all() 
-                                 )
-                                .otherwise(False) # Not near zero if not list/array
+                               pl.col(model_key).list.eval(
+                                   pl.element().abs() < threshold
+                               ).list.all()
+                               .fill_null(False) # Treat null results (e.g. non-list rows) as False
                            )
+                           # --- End Corrected near-zero expression ---
                            
                            # --- DEBUGGING START --- 
                            # Calculate counts for each condition separately
