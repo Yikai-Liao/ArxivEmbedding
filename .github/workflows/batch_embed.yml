@@ -14,6 +14,10 @@ on:
         type: number
         default: 20
 
+concurrency:
+  group: 'huggingface'
+  cancel-in-progress: false
+
 jobs:
   list_files_and_create_tasks:
     runs-on: ubuntu-latest
