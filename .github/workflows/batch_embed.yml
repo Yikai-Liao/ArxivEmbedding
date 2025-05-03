@@ -56,7 +56,7 @@ jobs:
           mkdir -p $OUTPUT_DIR
           
           # Execute the script on a single line to avoid backslash issues
-          python script/local_split_tasks.py --repo-id "$REPO_ID" --matrix-count "$MATRIX_COUNT" --years "$TARGET_YEARS" --config-file "$CONFIG_FILE" --output-dir "$OUTPUT_DIR" --max-tasks-per-matrix 3
+          python script/local_split_tasks.py --repo-id "$REPO_ID" --matrix-count "$MATRIX_COUNT" --years "$TARGET_YEARS" --config-file "$CONFIG_FILE" --output-dir "$OUTPUT_DIR"
             
           # Script's stdout/stderr will still be printed for logging.
           # No need for manual parsing or setting outputs here anymore.
