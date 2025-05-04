@@ -40,7 +40,17 @@ def merge_data(raw_data: Dict[int, pl.DataFrame], artifacts_data: Dict[int, List
     for year, raw_df in raw_data.items():
         merged_df = raw_df.clone()
         for artifact_df in artifacts_data[year]:
-            merged_df = merged_df.update(artifact_df, on='id')
+            model_col_name = next((col for col in artifact_df.columns if col != 'id'), None)
+            assert model_col_name is not None, f"No model column found in artifact DataFrame for year {year}"
+            if model_col_name in merged_df.columns:
+                # Column exists: Update using the artifact data
+                # Select only 'id' and the model column for the update
+                merged_df = merged_df.update(artifact_df.select(['id', model_col_name]), on='id')
+            else:
+                # Column doesn't exist: Add using a left join
+                # Select only 'id' and the model column for the join
+                merged_df = merged_df.join(artifact_df.select(['id', model_col_name]), on='id', how='left')
+            
         merged_data[year] = merged_df
     return merged_data
 
