@@ -47,8 +47,8 @@ def fetch_recent_data(config_file, output_file, days=2):
         "python", "script/fetch_arxiv_oai_by_date.py",
         "--from-date", from_date_str,
         "--until-date", today_str,
-        "--config", config_file,
-        "--output-file", output_file
+        "--config", str(config_file),
+        "--output-file", str(output_file)
     ]
     
     return run_command(cmd, f"爬取 Arxiv 数据 (从 {from_date_str} 到 {today_str})")
