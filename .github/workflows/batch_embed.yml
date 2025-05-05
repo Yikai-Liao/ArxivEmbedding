@@ -12,7 +12,7 @@ on:
         description: '要创建的并行矩阵数量 (推荐: 10-40)'
         required: false
         type: number
-        default: 20
+        default: 40
   workflow_call: # 允许被其他工作流调用
     inputs:
       years:
