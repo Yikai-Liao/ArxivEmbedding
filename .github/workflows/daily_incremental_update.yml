@@ -24,8 +24,7 @@ jobs:
       
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install polars huggingface_hub tqdm loguru numpy datetime xmltodict toml
       
       - name: Fetch and update Arxiv data
         env:
@@ -38,4 +37,3 @@ jobs:
         with:
           workflow: Batch Generate Embeddings for Historical Data
           token: ${{ secrets.GITHUB_TOKEN }}
-          inputs: '{"matrix_count": 20}'
