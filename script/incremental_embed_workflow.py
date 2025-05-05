@@ -167,10 +167,13 @@ def main():
     # 文件路径
     incremental_file = temp_dir / "incremental.parquet"
     
-    # 获取环境变量中的 HF_TOKEN
-    hf_token = os.environ.get("HF_TOKEN")
+    # 获取环境变量中的 Token
+    hf_token = os.environ.get("HUGGINGFACE_TOKEN")
     if not hf_token:
-        logger.warning("未找到 HF_TOKEN 环境变量。如果仓库是私有的，上传可能会失败。")
+        hf_token = os.environ.get("HF_TOKEN")  # 尝试备用环境变量名
+        
+    if not hf_token:
+        logger.warning("未找到 HUGGINGFACE_TOKEN 或 HF_TOKEN 环境变量。如果仓库是私有的，上传可能会失败。")
     
     logger.info(f"=== Arxiv 增量数据获取与合并工作流开始 ===")
     logger.info(f"配置文件: {args.config}")
