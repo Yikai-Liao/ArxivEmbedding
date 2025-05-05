@@ -27,7 +27,7 @@ jobs:
       
       - name: Fetch and update Arxiv data
         env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HUGGINGFACE_TOKEN: ${{ secrets.HUGGINGFACE_TOKEN }}
         run: |
           python script/incremental_embed_workflow.py --days 2 --repo-id lyk/ArxivEmbedding
       
