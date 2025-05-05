@@ -34,5 +34,5 @@ jobs:
       - name: Trigger batch embedding workflow
         uses: benc-uk/workflow-dispatch@v1
         with:
-          workflow: Batch Embed
+          workflow: Batch Generate Embeddings for Historical Data
           token: ${{ secrets.GITHUB_TOKEN }}
