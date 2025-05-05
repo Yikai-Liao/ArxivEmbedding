@@ -30,7 +30,7 @@ jobs:
         env:
           HUGGINGFACE_TOKEN: ${{ secrets.HUGGINGFACE_TOKEN }}
         run: |
-          python script/incremental_embed_workflow.py --days 30 --repo-id lyk/ArxivEmbedding
+          python script/incremental_embed_workflow.py --days 2 --repo-id lyk/ArxivEmbedding
       
       - name: Trigger batch embedding workflow
         uses: benc-uk/workflow-dispatch@v1
