@@ -3,7 +3,7 @@ name: Daily Arxiv Incremental Update
 on:
   schedule:
     # 每天凌晨 2:30 UTC (对应北京时间 10:30) 运行
-    - cron: '30 2 * * *'
+    - cron: '14 3 * * *'
   # 允许手动触发
   workflow_dispatch:
 
