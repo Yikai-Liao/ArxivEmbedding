@@ -1,0 +1,29 @@
+name: Hugging Face Super Squash
+
+on:
+  workflow_dispatch:
+jobs:
+  super_squash_job:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          # Fetch all history for all branches and tags if squashing git history
+          fetch-depth: 0 
+          token: ${{ secrets.GITHUB_TOKEN }} # Or a PAT if pushing to a different repo or need more permissions
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10' # Consistent with other workflows
+
+      - name: Install dependencies
+        run: |
+          pip install "huggingface_hub[hf_xet]"
+
+      - name: Perform Hugging Face Super Squash
+        env:
+          HF_TOKEN: ${{ secrets.HUGGINGFACE_TOKEN }} # Ensure this secret is set in your repository
+        run: |
+          python -c "from huggingface_hub import HfApi; HfApi().super_squash_history(repo_id='lyk/ArxivEmbedding')"
