@@ -24,7 +24,7 @@ jobs:
       
       - name: Install dependencies
         run: |
-          pip install polars huggingface_hub tqdm loguru numpy datetime xmltodict toml
+          pip install polars 'huggingface_hub[hf_xet]' tqdm loguru numpy datetime xmltodict toml
       
       - name: Fetch and update Arxiv data
         env:
