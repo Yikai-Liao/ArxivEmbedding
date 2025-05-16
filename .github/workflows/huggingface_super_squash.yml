@@ -26,4 +26,4 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HUGGINGFACE_TOKEN }} # Ensure this secret is set in your repository
         run: |
-          python -c "from huggingface_hub import HfApi; HfApi().super_squash_history(repo_id='lyk/ArxivEmbedding')"
+          python -c "from huggingface_hub import HfApi; HfApi().super_squash_history(repo_id='lyk/ArxivEmbedding',repo_type='dataset')"
