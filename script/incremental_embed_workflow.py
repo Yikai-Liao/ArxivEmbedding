@@ -147,8 +147,18 @@ def main():
     parser = argparse.ArgumentParser(description="Arxiv 增量数据获取与合并到 Hugging Face 数据集")
     parser.add_argument("--config", type=str, default="config.toml", 
                       help="配置文件路径 (默认: config.toml)")
-    parser.add_argument("--days", type=int, default=2, 
-                      help="获取最近几天的数据 (默认: 2)")
+    # 验证 days 必须为正整数（不接受浮点）
+    def positive_int(value):
+        try:
+            iv = int(value)
+        except Exception:
+            raise argparse.ArgumentTypeError(f"days 必须为正整数，收到: {value}")
+        if iv <= 0:
+            raise argparse.ArgumentTypeError("days 必须为大于 0 的正整数")
+        return iv
+
+    parser.add_argument("--days", type=positive_int, default=2, 
+                      help="获取最近几天的数据 (默认: 2)。仅接受正整数")
     parser.add_argument("--repo-id", type=str, default="lyk/ArxivEmbedding", 
                       help="Hugging Face 数据集仓库 ID (默认: lyk/ArxivEmbedding)")
     parser.add_argument("--temp-dir", type=str, default="temp", 

@@ -6,31 +6,48 @@ on:
     - cron: '14 3 * * *'
   # 允许手动触发
   workflow_dispatch:
+    inputs:
+      days:
+        description: '获取最近多少天的数据（仅在手动触发时有效，默认为 2）'
+        required: false
+        default: '2'
 
 
 jobs:
   fetch-and-update:
-    runs-on: ubuntu-latest
+    runs-on: uv
     permissions: write-all
     
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
       
-      - name: Set up Python
-        uses: actions/setup-python@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
         with:
-          python-version: '3.10'
-      
-      - name: Install dependencies
+          # pin a stable uv version (adjust if you prefer another)
+          version: '0.8.22'
+
+      - name: Install Python via uv
         run: |
-          pip install polars 'huggingface_hub[hf_xet]' tqdm loguru numpy datetime xmltodict toml
+          uv python install 3.10
+      
+      - name: Sync project environment with uv
+        run: |
+          # Use locked sync when uv.lock exists
+          if [ -f uv.lock ]; then
+            uv sync --locked --all-extras --dev
+          else
+            uv sync --all-extras --dev
+          fi
       
       - name: Fetch and update Arxiv data
         env:
           HUGGINGFACE_TOKEN: ${{ secrets.HUGGINGFACE_TOKEN }}
         run: |
-          python script/incremental_embed_workflow.py --days 2 --repo-id lyk/ArxivEmbedding
+          # 当通过 schedule 自动触发时，使用默认 2 天；手动触发时可通过 workflow_dispatch inputs.days 覆盖
+          DAYS_INPUT="${{ github.event.inputs.days || '2' }}"
+          uv run python script/incremental_embed_workflow.py -- --days "$DAYS_INPUT" --repo-id lyk/ArxivEmbedding
       
       - name: Trigger batch embedding workflow
         uses: benc-uk/workflow-dispatch@v1

@@ -177,3 +177,6 @@ data/.git
 data/*.parquet
 
 _local_hub_downloads
+
+#Ignore vscode AI rules
+.github/instructions/codacy.instructions.md

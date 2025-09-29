@@ -32,7 +32,7 @@ concurrency:
 
 jobs:
   list_files_and_create_tasks:
-    runs-on: ubuntu-latest
+    runs-on: uv
     outputs:
       task_matrices: ${{ steps.list_files.outputs.task_matrices }}
       matrix_count: ${{ steps.list_files.outputs.matrix_count }}
@@ -41,22 +41,28 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
         with:
-          python-version: '3.10'
+          version: '0.8.22'
 
-      - name: Install dependencies
+      - name: Install Python via uv
         run: |
-          python -m pip install --upgrade pip
-          # 只安装必要的依赖用于任务拆分，不包含torch和embed等重型依赖
-          pip install huggingface_hub polars toml numpy tqdm
+          uv python install 3.10
+
+      - name: Sync project environment with uv (task-splitting)
+        run: |
+          if [ -f uv.lock ]; then
+            uv sync --locked --no-dev
+          else
+            uv sync --no-dev
+          fi
 
       - name: List files, check embeddings, and create task matrices
         id: list_files
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          REPO_ID: ${{ inputs.repo_id || 'lyk/ArxivEmbedding' }}
+          REPO_ID: lyk/ArxivEmbedding
           MATRIX_COUNT: ${{ inputs.matrix_count || 10 }}
           TARGET_YEARS: ${{ inputs.years || '' }} # Corrected: use inputs.years
           CONFIG_FILE: config.toml
@@ -99,7 +105,7 @@ jobs:
   process_task_matrix:
     needs: list_files_and_create_tasks
     if: needs.list_files_and_create_tasks.outputs.matrix_count != '0' # Use string comparison
-    runs-on: ubuntu-latest # Consider GPU runners if available: ubuntu-latest-gpu
+    runs-on: uv # Consider GPU runners if available: use appropriate runner label
     strategy:
       fail-fast: false # Continue other jobs even if one fails
       matrix:
@@ -108,10 +114,14 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
         with:
-          python-version: '3.10'
+          version: '0.8.22'
+
+      - name: Install Python via uv
+        run: |
+          uv python install 3.10
 
       - name: Get pip cache dir
         id: pip-cache
@@ -126,11 +136,13 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-pip-
 
-      - name: Install dependencies
+      - name: Sync project environment with uv (processing matrix)
         run: |
-          python -m pip install --upgrade pip
-          # Use --extra-index-url so pip checks PyPI *and* the PyTorch CPU index
-          pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cpu
+          if [ -f uv.lock ]; then
+            uv sync --locked --all-extras --dev
+          else
+            uv sync --all-extras --dev
+          fi
           # Add accelerate if using multi-gpu or specific optimizations
           # pip install accelerate
           # Add GPU specific libraries if using GPU runner
@@ -161,8 +173,8 @@ jobs:
           echo "Task File: $TASK_FILE"
           echo "Output Directory: $OUTPUT_DIR"
 
-          # Run the script on a single line
-          python script/process_matrix_tasks.py --matrix-id $MATRIX_ID --task-file $TASK_FILE --output-dir $OUTPUT_DIR --config-file config.toml --repo-id $REPO_ID --batch-size 16 --engine torch --device cpu
+          # Run the script on a single line via uv
+          uv run python script/process_matrix_tasks.py -- --matrix-id $MATRIX_ID --task-file $TASK_FILE --output-dir $OUTPUT_DIR --config-file config.toml --repo-id $REPO_ID --batch-size 16 --engine torch --device cpu
 
       - name: Upload matrix output artifacts
         uses: actions/upload-artifact@v4
@@ -178,21 +190,28 @@ jobs:
     # We need to be careful here. Let's run it always if list_files ran,
     # but the inner script should handle the case where no artifacts are downloaded.
     if: always() && needs.list_files_and_create_tasks.result == 'success'
-    runs-on: ubuntu-latest
+    runs-on: uv
     # This job runs once after all matrix jobs are done (or if none were needed)
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
         with:
-          python-version: '3.10'
+          version: '0.8.22'
 
-      - name: Install dependencies
+      - name: Install Python via uv
         run: |
-          python -m pip install --upgrade pip
-          pip install polars 'huggingface_hub[hf_xet]' tqdm loguru numpy
+          uv python install 3.10
+
+      - name: Sync project environment with uv (merge/upload)
+        run: |
+          if [ -f uv.lock ]; then
+            uv sync --locked --all-extras --dev
+          else
+            uv sync --all-extras --dev
+          fi
 
       - name: Download all matrix output artifacts
         uses: actions/download-artifact@v4
@@ -217,7 +236,7 @@ jobs:
           # REPO_ID is passed as argument
         run: |
           echo "Running merge and upload script..."
-          # Run the script on a single line, using the new merge.py
-          python script/merge.py --repo-id "lyk/ArxivEmbedding" --artifacts-dir "artifacts"
+          # Run the script via uv
+          uv run python script/merge.py -- --repo-id "lyk/ArxivEmbedding" --artifacts-dir "artifacts"
 
           echo "Merge and upload script finished."
