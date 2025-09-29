@@ -1,0 +1,52 @@
+name: Keep GitHub Actions Alive
+
+on:
+  schedule:
+    - cron: '0 0 * * 0'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  heartbeat:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+
+      - name: Increment keepalive counter
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          counter_file = Path('keepalive_counter.txt')
+          try:
+            current = int(counter_file.read_text().strip())
+          except Exception:
+            current = 0
+
+          counter_file.write_text(f"{current + 1}\n")
+          PY
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Commit changes
+        id: commit
+        run: |
+          if git diff --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            git add keepalive_counter.txt
+            git commit -m "chore: keepalive heartbeat"
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Push changes
+        if: steps.commit.outputs.changed == 'true'
+        run: git push
