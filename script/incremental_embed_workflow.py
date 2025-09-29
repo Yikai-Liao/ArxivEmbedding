@@ -24,12 +24,12 @@ def run_command(cmd, desc=None):
     logger.debug(f"执行命令: {' '.join(cmd)}")
     
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-        logger.debug(f"命令输出: {result.stdout}")
-        return result.stdout
+        subprocess.run(cmd, check=True)
+        return None
     except subprocess.CalledProcessError as e:
         logger.error(f"命令执行失败: {e}")
-        logger.error(f"错误输出: {e.stderr}")
+        if getattr(e, "stderr", None):
+            logger.error(f"错误输出: {e.stderr}")
         raise
 
 def fetch_recent_data(config_file, output_file, days=2):
