@@ -1,0 +1,16 @@
+
+
+
+[metadata]
+hf_repo = "lyk/ArxivMetaData"
+row_group = 200_000
+
+[embedding]
+hf_repo = "lyk/ArxivEmbedding"
+row_group = 200_000
+model = "gemini-embedding-001"
+dim = 1536
+start_date = "2020-01-01"
+categories = ["cs.CL", "cs.CV", "cs.AI", "cs.LG", "stat.ML", "cs.IR", "cs.CY"]
+
+

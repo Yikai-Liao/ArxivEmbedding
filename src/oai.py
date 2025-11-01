@@ -258,7 +258,7 @@ class ArxivOAIClient:
             authors=authors,
             publish_date=created,
             update_date=updated,
-            comments=comments,
-            doi=doi,
-            license=license_value,
+            # comments=comments,
+            # doi=doi,
+            # license=license_value,
         )

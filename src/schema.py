@@ -17,9 +17,9 @@ PAPER_METADATA_SCHEMA = pa.schema(
         pa.field(UPDATE_DATE, pa.date32()),
         pa.field(CATEGORIES, pa.list_(pa.string()), nullable=True),
         pa.field(AUTHORS, pa.string()),
-        pa.field(COMMENTS, pa.string(), nullable=True),
-        pa.field(DOI, pa.string(), nullable=True),
-        pa.field(LICENSE, pa.string(), nullable=True),
+        # pa.field(COMMENTS, pa.string(), nullable=True),
+        # pa.field(DOI, pa.string(), nullable=True),
+        # pa.field(LICENSE, pa.string(), nullable=True),
     ]
 )
 
@@ -31,9 +31,9 @@ PAPER_METADATE_PL_SCHEMA: Dict[str, pl.DataType] = dict([
     (UPDATE_DATE, Date),
     (CATEGORIES, List(String)),
     (AUTHORS, String),
-    (COMMENTS, String),
-    (DOI, String),
-    (LICENSE, String),
+    # (COMMENTS, String),
+    # (DOI, String),
+    # (LICENSE, String),
 ])
 
 
@@ -41,10 +41,10 @@ ARXIV_OAI_SNAPSHOT_PL_SCHEMA: Dict[str, pl.DataType] = dict([
     (ID, String),
     (AUTHORS, String),
     (TITLE, String),
-    (COMMENTS, String),
-    (DOI, String),
+    # (COMMENTS, String),
+    # (DOI, String),
     (CATEGORIES, String),
-    (LICENSE, String),
+    # (LICENSE, String),
     (ABSTRACT, String),
     (UPDATE_DATE, Date),
     (VERSIONS, List(Struct({'version': String, 'created': String}))),
@@ -60,9 +60,9 @@ class ArxivRecord:
     update_date: date
     categories: list[str]
     authors: str
-    comments: str | None = None
-    doi: str | None = None
-    license: str | None = None
+    # comments: str | None = None
+    # doi: str | None = None
+    # license: str | None = None
     
     def __hash__(self) -> int:
         """Hash based only on id for set deduplication."""
@@ -74,12 +74,9 @@ class ArxivRecord:
             return NotImplemented
         return self.id == other.id
     
-def paper_embedding_schema(dim: int) -> pa.Schema:
+def paper_embedding_schema_pl(dim: int):
     """Generate the schema for the embedding table."""
-    return pa.schema(
-        [
-            pa.field(ID, pa.string()),
-            pa.field(EMBEDDING_VECTOR, pa.list_(pa.float16(), dim)),
-        ]
-    )
- 
+    return {
+        ID: String,
+        EMBEDDING_VECTOR: pl.Array(pl.Float32, dim),
+    }
