@@ -1,0 +1,96 @@
+name: Update Arxiv Data
+
+on:
+  workflow_dispatch:
+    inputs:
+      update_metadata:
+        description: "Run metadata update step"
+        type: boolean
+        default: true
+      update_embedding:
+        description: "Run embedding update step"
+        type: boolean
+        default: true
+      clean_cache:
+        description: "Clean Hugging Face cache before running"
+        type: boolean
+        default: false
+      squash_history:
+        description: "Squash Hugging Face dataset history after upload"
+        type: boolean
+        default: true
+  schedule:
+    - cron: "0 3 * * *"
+
+concurrency:
+  group: arxiv-update
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  run-update:
+    name: Run update.py
+    runs-on: ubuntu-latest
+    env:
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      HUGGINGFACE_TOKEN: ${{ secrets.HUGGINGFACE_TOKEN }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate required secrets
+        run: |
+          if [ -z "${GEMINI_API_KEY:-}" ]; then
+            echo "Missing required secret: GEMINI_API_KEY"
+            exit 1
+          fi
+          if [ -z "${HUGGINGFACE_TOKEN:-}" ]; then
+            echo "Missing required secret: HUGGINGFACE_TOKEN"
+            exit 1
+          fi
+
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          python-version: "3.12"
+
+      - name: Sync project dependencies
+        run: uv sync --locked
+
+      - name: Run update script
+        run: |
+          set -euo pipefail
+          metadata=${{ inputs.update_metadata != 'false' && '1' || '0' }}
+          embedding=${{ inputs.update_embedding != 'false' && '1' || '0' }}
+          clean=${{ inputs.clean_cache == 'true' && '1' || '0' }}
+          squash=${{ inputs.squash_history != 'false' && '1' || '0' }}
+
+          cmd=(uv run python ./script/update.py)
+          if [ "$metadata" = 1 ]; then
+            cmd+=("--metadata")
+          else
+            cmd+=("--no-metadata")
+          fi
+
+          if [ "$embedding" = 1 ]; then
+            cmd+=("--embedding")
+          else
+            cmd+=("--no-embedding")
+          fi
+
+          if [ "$clean" = 1 ]; then
+            cmd+=("--clean")
+          else
+            cmd+=("--no-clean")
+          fi
+
+          if [ "$squash" = 1 ]; then
+            cmd+=("--squash")
+          else
+            cmd+=("--no-squash")
+          fi
+
+          "${cmd[@]}"
