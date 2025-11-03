@@ -1,11 +1,9 @@
-from datasets import load_dataset
-import toml
 import polars as pl
 import sys
 import os
 from dotenv import load_dotenv
-from huggingface_hub import HfApi
-from datetime import date
+from loguru import logger
+import typer
 
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 
@@ -15,185 +13,192 @@ from src.order import order_by_category_and_date, dump_metadata, align_order
 from src.schema import PAPER_METADATE_PL_SCHEMA, paper_embedding_schema_pl
 from src.name import *
 from src.embedding import *
-
-def load_config(config_path):
-    with open(config_path, 'r') as file:
-        config = toml.load(file)
-    return config
+from src.io import *
+from src.config import AppConfig, EmbeddingConfig, MetaDataConfig, load_config
 
 
-def load_metadata(hf_repo:str) -> pl.LazyFrame:
-    dataset = load_dataset(
-        path=hf_repo,
-        cache_dir=BASE_DIR / 'data' / 'hg',
-        # keep_in_memory=,
-        split='train',
-    )
-    return dataset.to_polars().lazy().match_to_schema(PAPER_METADATE_PL_SCHEMA, extra_columns='ignore')
-
-def load_embedding(hf_repo:str, dim) -> pl.LazyFrame:
-    schema = paper_embedding_schema_pl(dim)
-    
-    try:
-        dataset = load_dataset(
-            path=hf_repo,
-            cache_dir=BASE_DIR / 'data' / 'hg',
-            # keep_in_memory=,
-            split='train',
-        )
-    except Exception as e:
-        print(f"Failed to load dataset from {hf_repo}: {e}")
-        dataset = None
-    if dataset is None or dataset.num_rows == 0:
-        return pl.LazyFrame(schema=schema)
-    return dataset.to_polars().lazy().match_to_schema(schema, extra_columns='ignore')
-
-
-def upload_metadata(path, path_in_repo, hf_repo:str):
-    api = HfApi()
-    api.upload_file(
-        path_or_fileobj=path,
-        path_in_repo=path_in_repo,
-        repo_id=hf_repo,
-        repo_type='dataset',
-    )
-    api.super_squash_history(
-        repo_id=hf_repo,
-        repo_type='dataset',
-    )
-    
-    
-def crawl_metadata(ds):
-    # find the last updated date
-    max_date = ds.select(pl.col(UPDATE_DATE).max()).collect().item()
-    today = date.today()
-    return fetch_arxiv_oai(
-        categories=None,
-        start=max_date,
-        end=today,
-    )
-    
-def filter_new_metadata(ds_meta, ds_embed, categories=None, start_date=None):
-    ds_embed_ids = ds_embed.select(pl.col(ID)).to_series().to_list()
-    ds_new_meta = ds_meta.lazy().filter(
-        ~pl.col(ID).is_in(ds_embed_ids)
-    )
-    if start_date is not None:
-        ds_new_meta = ds_new_meta.filter(
-            pl.col(UPDATE_DATE) >= date(*map(int, start_date.split('-')))
-        )
-    
-    if categories is not None:
-        ds_new_meta = ds_new_meta.filter(
-            pl.col(CATEGORIES).list.eval(
-                pl.any_horizontal([pl.element().str.starts_with(cat) for cat in categories])
-            ).list.any()
-        )
-
-    return ds_new_meta.collect()
-
-def embed(df, model, dim):
+def embed(df, model, dim, batch_size=500):
     contents = collect_content(df)
-    embeddings = google_batch_embedding(
-        model=model,
-        output_dimensionality=dim,
-        inputs=contents,
-        dtype=np.float32,
-    )
+    ids = df.select(pl.col(ID)).to_series()
+    
+    all_embeddings = []
+    total_batches = (len(contents) + batch_size - 1) // batch_size
+    
+    logger.info(f"Processing {len(contents)} items in {total_batches} batches (batch_size={batch_size})")
+    
+    for i in range(0, len(contents), batch_size):
+        batch_contents = contents[i:i + batch_size]
+        batch_num = i // batch_size + 1
+        logger.info(f"Processing batch {batch_num}/{total_batches} ({len(batch_contents)} items)")
+        
+        batch_embeddings = google_batch_embedding(
+            model=model,
+            output_dimensionality=dim,
+            inputs=batch_contents,
+            dtype=np.float32,
+        )
+        all_embeddings.append(batch_embeddings)
+    
+    embeddings = np.concatenate(all_embeddings, axis=0)
+    logger.success(f"Generated {len(embeddings)} embeddings")
+    
     df_embeddings = pl.DataFrame({
-        ID: df.select(pl.col(ID)).to_series(),
+        ID: ids,
         'embedding': embeddings.tolist(),
     }, schema=paper_embedding_schema_pl(dim))
     return df_embeddings
-    
-def wrirte_embeddings(df, path, row_group=50_000):
-    import pyarrow.parquet as pq
 
-    pq.write_table(
-        df.to_arrow(),
-        path,
-        row_group_size=row_group,
-        compression="zstd",
-        compression_level=5,
-        data_page_version="2.0",
-        use_byte_stream_split=["embedding.list.element"],   # 针对叶子 float32
-        use_dictionary={"embedding.list.element": False},   # 关闭该叶子字典
-    )
-
-def main():
-    load_dotenv(os.path.join(BASE_DIR, '.env'))
     
-    config = load_config(os.path.join(BASE_DIR, 'config.toml'))
-    ds = load_metadata(config['metadata']['hf_repo'])
-    new_metadata = crawl_metadata(ds)
+def update_metadata(config: MetaDataConfig, squash_history: bool = True):
+    logger.info(f"Loading metadata from {config.hf_repo}")
+    df = load_metadata(config.hf_repo)
+    logger.info(f"Current metadata count: {df.height}")
+    
+    logger.info("Crawling new metadata...")
+    new_metadata = crawl_metadata(df)
     if new_metadata.height == 0:
-        print("No new metadata to update.")
+        logger.info("No new metadata to update.")
         return
-    
 
-    df = pl.concat([df, new_metadata.lazy()]).unique(subset=ID, keep='last')
-    df = order_by_category_and_date(ds).collect()
+    logger.info(f"Found {new_metadata.height} new metadata entries")
+    df = pl.concat([df, new_metadata]).unique(subset=ID, keep='last')
+    df = order_by_category_and_date(df)
     
+    logger.info(f"Dumping metadata to {BASE_DIR / 'data' / 'metadata.parquet'}")
     dump_metadata(
         df,
         BASE_DIR / 'data' / 'metadata.parquet',
-        row_group=config['metadata'].get('row_group', 50_000)
-    )
-    upload_metadata(
-        BASE_DIR / 'data' / 'metadata.parquet',
-        'metadata.parquet',
-        config['metadata']['hf_repo'],
+        row_group=config.row_group,
     )
     
-    df_embed = load_embedding(config['embedding']['hf_repo'], config['embedding']['dim']).collect()
-    print(df_embed)
-    ds_new_meta = filter_new_metadata(
-        ds.collect(), df_embed,
-        categories=config['embedding'].get('categories', None),
-        start_date=config['embedding'].get('start_date', None),
+    logger.info(f"Uploading metadata to {config.hf_repo}")
+    upload_data(
+        path = BASE_DIR / 'data' / 'metadata.parquet',
+        path_in_repo = 'metadata.parquet',
+        hf_repo = config.hf_repo,
+        squash_history=squash_history,
     )
-    print(ds_new_meta)
-    if ds_new_meta.height == 0:
-        print("No new metadata to embed.")
+    logger.success("Metadata update completed!")
+    return df
+    
+def update_embedding(config: EmbeddingConfig, metadata: pl.DataFrame|None = None, squash_history: bool = True):
+    logger.info(f"Loading embeddings from {config.hf_repo} (dim={config.dim})")
+    df = load_embedding(config.hf_repo, config.dim)
+    logger.info(f"Current embedding count: {df.height}")
+    
+    meta_data = metadata if metadata is not None else load_metadata(config.hf_repo)
+    logger.info(f"Filtering new metadata (categories={config.categories}, start_date={config.start_date})")
+    data_to_embed = filter_new_metadata(
+        ds_meta=meta_data,
+        ds_embed=df,
+        categories=config.categories,
+        start_date=config.start_date,
+    )
+    if data_to_embed.height == 0:
+        logger.info("No new metadata to embed.")
         return
     
+    logger.info(f"Generating embeddings for {data_to_embed.height} new papers (model={config.model})")
     new_embeddings = embed(
-        ds_new_meta,
-        model=config['embedding']['model'],
-        dim=config['embedding']['dim'],
+        data_to_embed,
+        model=config.model,
+        dim=config.dim,
     )
     
-    full_embeddings = pl.concat([df_embed, new_embeddings]).unique(subset=ID, keep='last')
-    full_embeddings = align_order(df, full_embeddings, on=ID)
-    print(full_embeddings)
+    logger.info("Merging and aligning embeddings")
+    full_embeddings = pl.concat([df, new_embeddings]).unique(subset=ID, keep='last')
+    full_embeddings = align_order(meta_data, full_embeddings, on=ID)
+    
+    logger.info(f"Writing embeddings to {BASE_DIR / 'data' / 'embedding.parquet'}")
     wrirte_embeddings(
         full_embeddings,
         BASE_DIR / 'data' / 'embedding.parquet',
-        row_group=config['embedding'].get('row_group', 50_000)
+        row_group=config.row_group,
     )
     
-    upload_metadata(
-        BASE_DIR / 'data' / 'embedding.parquet',
-        'embedding.parquet',
-        config['embedding']['hf_repo'],
+    logger.info(f"Uploading embeddings to {config.hf_repo}")
+    upload_data(
+        path = BASE_DIR / 'data' / 'embedding.parquet',
+        path_in_repo = 'embedding.parquet',
+        hf_repo = config.hf_repo,
+        squash_history=squash_history,
     )
+    logger.success("Embedding update completed!")
+    return full_embeddings
     
     
+load_dotenv(BASE_DIR / ".env")
+
+app = typer.Typer(help="CLI update tool for Arxiv metadata and embeddings.")
+
+
+@app.command()
+def main(
+    config_path: str = typer.Option(
+        str(BASE_DIR / 'config.toml'),
+        "--config", "-c",
+        help="Path to the configuration file"
+    ),
+    update_metadata_flag: bool = typer.Option(
+        True,
+        "--metadata/--no-metadata",
+        help="Whether to update metadata"
+    ),
+    update_embedding_flag: bool = typer.Option(
+        True,
+        "--embedding/--no-embedding",
+        help="Whether to update embeddings"
+    ),
+    squash_history: bool = typer.Option(
+        True,
+        "--squash/--no-squash",
+        help="Whether to squash git history when uploading"
+    ),
+    clean_cache: bool = typer.Option(
+        False,
+        "--clean/--no-clean",
+        help="Whether to clean cache directory"
+    ),
+):
+    """Update Arxiv metadata and/or embeddings."""
+    import shutil
+    from pathlib import Path
     
-    # print(df.head())
-    # output_dir = BASE_DIR / 'data' / 'metadata.parquet'
-    # dump_metadata(
-    #     df,
-    #     output_dir,
-    #     row_group=config['metadata'].get('row_group', 50_000)
-    # )
-    # upload_metadata(
-    #     output_dir,
-    #     'metadata.parquet',
-    #     config['metadata']['hf_repo'],
-    # )
+    logger.info("=" * 60)
+    logger.info("Starting Arxiv update process")
+    logger.info("=" * 60)
+    logger.info(f"Config path: {config_path}")
+    logger.info(f"Update metadata: {update_metadata_flag}")
+    logger.info(f"Update embedding: {update_embedding_flag}")
+    logger.info(f"Squash history: {squash_history}")
+    logger.info(f"Clean cache: {clean_cache}")
     
+    config = load_config(AppConfig, Path(config_path))
     
+    if clean_cache:
+        cache_dir = BASE_DIR / 'data' / 'hg'
+        if cache_dir.exists():
+            logger.warning(f"Cleaning cache directory: {cache_dir}")
+            shutil.rmtree(cache_dir)
+            logger.success("Cache directory cleaned")
     
+    metadata = None
+    if update_metadata_flag:
+        logger.info("\n" + "=" * 60)
+        logger.info("UPDATING METADATA")
+        logger.info("=" * 60)
+        metadata = update_metadata(config.metadata, squash_history=squash_history)
+    
+    if update_embedding_flag:
+        logger.info("\n" + "=" * 60)
+        logger.info("UPDATING EMBEDDINGS")
+        logger.info("=" * 60)
+        update_embedding(config.embedding, metadata=metadata, squash_history=squash_history)
+    
+    logger.info("\n" + "=" * 60)
+    logger.success("All updates completed successfully!")
+    logger.info("=" * 60)
+
+
 if __name__ == "__main__":
-    main()
+    app()

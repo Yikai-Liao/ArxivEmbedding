@@ -16,4 +16,5 @@ dependencies = [
     "python-dotenv>=1.2.1",
     "toml>=0.10.2",
     "tqdm>=4.67.1",
+    "typer>=0.20.0",
 ]
