@@ -81,15 +81,14 @@ def update_metadata(config: MetaDataConfig, squash_history: bool = True):
     logger.success("Metadata update completed!")
     return df
     
-def update_embedding(config: EmbeddingConfig, metadata: pl.DataFrame|None = None, squash_history: bool = True):
+def update_embedding(config: EmbeddingConfig, metadata: pl.DataFrame = None, squash_history: bool = True):
     logger.info(f"Loading embeddings from {config.hf_repo} (dim={config.dim})")
     df = load_embedding(config.hf_repo, config.dim)
     logger.info(f"Current embedding count: {df.height}")
-    
-    meta_data = metadata if metadata is not None else load_metadata(config.hf_repo)
+
     logger.info(f"Filtering new metadata (categories={config.categories}, start_date={config.start_date})")
     data_to_embed = filter_new_metadata(
-        ds_meta=meta_data,
+        ds_meta=metadata,
         ds_embed=df,
         categories=config.categories,
         start_date=config.start_date,
@@ -107,7 +106,7 @@ def update_embedding(config: EmbeddingConfig, metadata: pl.DataFrame|None = None
     
     logger.info("Merging and aligning embeddings")
     full_embeddings = pl.concat([df, new_embeddings]).unique(subset=ID, keep='last')
-    full_embeddings = align_order(meta_data, full_embeddings, on=ID)
+    full_embeddings = align_order(metadata, full_embeddings, on=ID)
     
     logger.info(f"Writing embeddings to {BASE_DIR / 'data' / 'embedding.parquet'}")
     wrirte_embeddings(
@@ -184,18 +183,18 @@ def main(
     
     metadata = None
     if update_metadata_flag:
-        logger.info("\n" + "=" * 60)
         logger.info("UPDATING METADATA")
         logger.info("=" * 60)
         metadata = update_metadata(config.metadata, squash_history=squash_history)
-    
+        
+    if metadata is None:
+        metadata = load_metadata(config.metadata.hf_repo)
+        
     if update_embedding_flag:
-        logger.info("\n" + "=" * 60)
         logger.info("UPDATING EMBEDDINGS")
         logger.info("=" * 60)
         update_embedding(config.embedding, metadata=metadata, squash_history=squash_history)
     
-    logger.info("\n" + "=" * 60)
     logger.success("All updates completed successfully!")
     logger.info("=" * 60)
 
