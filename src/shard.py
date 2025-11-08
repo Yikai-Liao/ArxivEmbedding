@@ -94,10 +94,20 @@ def load_all_year_shards(base_dir: Path, file_prefix: str, hf_repo: str, lazy: b
     )
     
     # Load local files
-    shard_files = sorted(base_dir.glob(f"{file_prefix}_*.parquet"))
+    all_files = sorted(base_dir.glob(f"{file_prefix}_*.parquet"))
+    
+    # Filter out invalid files (e.g., embedding_None.parquet from old bugs)
+    shard_files = []
+    for f in all_files:
+        year_str = f.stem.split('_')[-1]
+        try:
+            int(year_str)  # Validate it's a valid year
+            shard_files.append(f)
+        except ValueError:
+            logger.warning(f"Skipping invalid shard file: {f.name} (invalid year: {year_str})")
     
     if not shard_files:
-        raise FileNotFoundError(f"No {file_prefix}_*.parquet files found in {base_dir}")
+        raise FileNotFoundError(f"No valid {file_prefix}_*.parquet files found in {base_dir}")
     
     # Extract year range for concise logging
     years = [int(f.stem.split('_')[-1]) for f in shard_files]
