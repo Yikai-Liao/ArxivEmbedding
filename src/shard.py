@@ -70,57 +70,37 @@ def save_year_shard(df: pl.DataFrame, base_dir: Path, year: int, file_prefix: st
     logger.info(f"Saved {df.height} rows to {path}")
 
 
-def load_all_year_shards(base_dir: Path, file_prefix: str, lazy: bool = False, hf_repo: str = None) -> pl.DataFrame | pl.LazyFrame:
+def load_all_year_shards(base_dir: Path, file_prefix: str, hf_repo: str, lazy: bool = False) -> pl.DataFrame | pl.LazyFrame:
     """Load and concatenate all year shards.
     
     Args:
         base_dir: Directory containing shards
         file_prefix: Prefix for filenames
+        hf_repo: HuggingFace repo to download from
         lazy: Whether to return LazyFrame
-        hf_repo: Optional HuggingFace repo to download from if local files don't exist
     
     Returns:
         Concatenated DataFrame or LazyFrame
     """
-    # Try local files first
+    from huggingface_hub import snapshot_download
+    
+    # Download entire repo (with auto caching)
+    snapshot_download(
+        repo_id=hf_repo,
+        repo_type="dataset",
+        local_dir=base_dir,
+        local_dir_use_symlinks=False,
+        allow_patterns=f"{file_prefix}_*.parquet",
+    )
+    
+    # Load local files
     shard_files = sorted(base_dir.glob(f"{file_prefix}_*.parquet"))
-    
-    # If no local files and hf_repo is provided, download from HuggingFace
-    if not shard_files and hf_repo:
-        logger.info(f"No local shards found, downloading from {hf_repo}")
-        api = HfApi()
-        try:
-            repo_files = api.list_repo_files(repo_id=hf_repo, repo_type="dataset")
-            year_files = [f for f in repo_files if f.startswith(file_prefix + "_") and f.endswith(".parquet")]
-            
-            if year_files:
-                base_dir.mkdir(parents=True, exist_ok=True)
-                for file_name in year_files:
-                    local_path = hf_hub_download(
-                        repo_id=hf_repo,
-                        filename=file_name,
-                        repo_type="dataset",
-                        local_dir=base_dir,
-                        local_dir_use_symlinks=False,
-                    )
-                    logger.info(f"Downloaded {file_name} to {local_path}")
-                
-                shard_files = sorted(base_dir.glob(f"{file_prefix}_*.parquet"))
-        except Exception as e:
-            logger.warning(f"Failed to download from HuggingFace: {e}")
-    
-    if not shard_files:
-        logger.warning(f"No shard files found for {file_prefix}")
-        return pl.LazyFrame() if lazy else pl.DataFrame()
-    
     logger.info(f"Loading {len(shard_files)} year shards: {[f.name for f in shard_files]}")
     
     if lazy:
-        shards = [pl.scan_parquet(str(f), low_memory=True) for f in shard_files]
-        return pl.concat(shards, how="vertical_relaxed")
+        return pl.concat([pl.scan_parquet(str(f), low_memory=True) for f in shard_files], how="vertical_relaxed")
     else:
-        shards = [pl.read_parquet(str(f)) for f in shard_files]
-        return pl.concat(shards, how="vertical_relaxed")
+        return pl.concat([pl.read_parquet(str(f)) for f in shard_files], how="vertical_relaxed")
 
 
 def update_year_shard(

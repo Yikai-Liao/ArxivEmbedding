@@ -127,7 +127,7 @@ def update_metadata_shards(
     logger.info(f"Loading metadata from {config.hf_repo}")
     
     # Load all existing year shards lazily (download from HF if needed)
-    metadata_lazy = load_all_year_shards(data_dir, "metadata", lazy=True, hf_repo=config.hf_repo)
+    metadata_lazy = load_all_year_shards(data_dir, "metadata", config.hf_repo, lazy=True)
     log_memory_usage("update_metadata: loaded metadata shards", data_dir)
     
     metadata_count = (
@@ -148,8 +148,14 @@ def update_metadata_shards(
     # Add year column to new metadata
     new_metadata = new_metadata.pipe(get_year_from_date)
     
-    # Get unique years in new data
-    new_years = sorted(new_metadata["publish_year"].unique().to_list())
+    # Filter out rows with null publish_year (should not happen, but be defensive)
+    null_year_count = new_metadata.filter(pl.col("publish_year").is_null()).height
+    if null_year_count > 0:
+        logger.warning(f"Found {null_year_count} metadata rows with null publish_year, filtering them out")
+        new_metadata = new_metadata.filter(pl.col("publish_year").is_not_null())
+    
+    # Get unique years in new data (filter out None)
+    new_years = sorted([y for y in new_metadata["publish_year"].unique().to_list() if y is not None])
     logger.info(f"New metadata spans years: {new_years}")
     
     # Update each affected year shard
@@ -167,20 +173,22 @@ def update_metadata_shards(
             row_group=config.row_group,
         )
         log_memory_usage(f"update_metadata: updated year {year}", data_dir)
-        
-        # Upload updated shard
-        upload_year_shard(
-            base_dir=data_dir,
-            year=year,
-            file_prefix="metadata",
-            hf_repo=config.hf_repo,
-            squash_history=squash_history,
-        )
-        log_memory_usage(f"update_metadata: uploaded year {year}", data_dir)
         del updated_shard
     
+    # Upload all updated shards in one batch (more efficient than per-file upload)
+    if new_years:
+        from src.io import upload_folder
+        logger.info(f"Uploading {len(new_years)} updated metadata shards to {config.hf_repo}")
+        upload_folder(
+            folder_path=data_dir,
+            hf_repo=config.hf_repo,
+            squash_history=squash_history,
+            commit_message=f"Update metadata for years: {new_years}",
+        )
+        log_memory_usage("update_metadata: uploaded all shards", data_dir)
+    
     logger.success("Metadata update completed!")
-    return load_all_year_shards(data_dir, "metadata", lazy=True, hf_repo=config.hf_repo)
+    return load_all_year_shards(data_dir, "metadata", config.hf_repo, lazy=True)
 
 
 def update_embedding_shards(
@@ -207,7 +215,7 @@ def update_embedding_shards(
     logger.info(f"Loading embeddings from {config.hf_repo} (dim={config.dim})")
     
     # Load all existing embedding shards lazily (download from HF if needed)
-    embeddings_lazy = load_all_year_shards(data_dir, "embedding", lazy=True, hf_repo=config.hf_repo)
+    embeddings_lazy = load_all_year_shards(data_dir, "embedding", config.hf_repo, lazy=True)
     log_memory_usage("update_embedding: loaded embeddings", data_dir)
     
     embedding_count = (
@@ -267,12 +275,19 @@ def update_embedding_shards(
         how="left"
     )
     
-    # Get unique years in new embeddings
-    new_years = sorted(new_embeddings["publish_year"].unique().to_list())
+    # Filter out rows with null publish_year (should not happen, but be defensive)
+    null_year_count = new_embeddings.filter(pl.col("publish_year").is_null()).height
+    if null_year_count > 0:
+        logger.warning(f"Found {null_year_count} embeddings with null publish_year, filtering them out")
+        new_embeddings = new_embeddings.filter(pl.col("publish_year").is_not_null())
+    
+    # Get unique years in new embeddings (filter out None)
+    new_years = sorted([y for y in new_embeddings["publish_year"].unique().to_list() if y is not None])
     logger.info(f"New embeddings span years: {new_years}")
     
     # Update each affected year shard
     from src.order import align_order
+    from src.shard import load_year_shard, save_year_shard
     
     for year in new_years:
         year_embeddings = new_embeddings.filter(pl.col("publish_year") == year).drop("publish_year")
@@ -280,7 +295,6 @@ def update_embedding_shards(
         log_memory_usage(f"update_embedding: processing year {year}", data_dir)
         
         # Load corresponding year metadata for alignment
-        from src.shard import load_year_shard
         year_metadata = load_year_shard(data_dir, year, "metadata", lazy=False)
         if year_metadata is None:
             logger.warning(f"No metadata shard for year {year}, skipping alignment")
@@ -301,20 +315,22 @@ def update_embedding_shards(
         log_memory_usage(f"update_embedding: aligned year {year}", data_dir)
         
         # Save aligned shard
-        from src.shard import save_year_shard
         save_year_shard(updated_shard, data_dir, year, "embedding", config.row_group)
-        
-        # Upload updated shard
-        upload_year_shard(
-            base_dir=data_dir,
-            year=year,
-            file_prefix="embedding",
+        log_memory_usage(f"update_embedding: saved year {year}", data_dir)
+        del updated_shard, year_metadata
+    
+    # Upload all updated shards in one batch (more efficient than per-file upload)
+    if new_years:
+        from src.io import upload_folder
+        logger.info(f"Uploading {len(new_years)} updated embedding shards to {config.hf_repo}")
+        upload_folder(
+            folder_path=data_dir,
             hf_repo=config.hf_repo,
             squash_history=squash_history,
+            commit_message=f"Update embeddings for years: {new_years}",
         )
-        log_memory_usage(f"update_embedding: uploaded year {year}", data_dir)
-        del updated_shard, year_metadata
+        log_memory_usage("update_embedding: uploaded all shards", data_dir)
     
     logger.success("Embedding update completed!")
     del data_to_embed, new_embeddings
-    return load_all_year_shards(data_dir, "embedding", lazy=True, hf_repo=config.hf_repo)
+    return load_all_year_shards(data_dir, "embedding", config.hf_repo, lazy=True)
