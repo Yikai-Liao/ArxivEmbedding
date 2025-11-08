@@ -95,7 +95,14 @@ def load_all_year_shards(base_dir: Path, file_prefix: str, hf_repo: str, lazy: b
     
     # Load local files
     shard_files = sorted(base_dir.glob(f"{file_prefix}_*.parquet"))
-    logger.info(f"Loading {len(shard_files)} year shards: {[f.name for f in shard_files]}")
+    
+    if not shard_files:
+        raise FileNotFoundError(f"No {file_prefix}_*.parquet files found in {base_dir}")
+    
+    # Extract year range for concise logging
+    years = [int(f.stem.split('_')[-1]) for f in shard_files]
+    year_range = f"{min(years)}-{max(years)}" if len(years) > 1 else str(years[0])
+    logger.info(f"Loading {len(shard_files)} year shards ({year_range})")
     
     if lazy:
         return pl.concat([pl.scan_parquet(str(f), low_memory=True) for f in shard_files], how="vertical_relaxed")

@@ -129,9 +129,7 @@ def upload_folder(folder_path: Path, hf_repo: str, squash_history: bool = True, 
         logger.warning(f"No parquet files found in {folder_path}")
         return
     
-    logger.info(f"Uploading {len(files)} files from {folder_path} to {hf_repo}")
-    for f in files:
-        logger.info(f"  - {f.name}")
+    logger.info(f"Uploading {len(files)} parquet files to {hf_repo}")
     
     # Upload entire folder in one commit
     api.upload_folder(

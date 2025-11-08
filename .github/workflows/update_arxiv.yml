@@ -35,7 +35,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-      HUGGINGFACE_TOKEN: ${{ secrets.HUGGINGFACE_TOKEN }}
+      HF_TOKEN: ${{ secrets.HUGGINGFACE_TOKEN }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -46,8 +46,8 @@ jobs:
             echo "Missing required secret: GEMINI_API_KEY"
             exit 1
           fi
-          if [ -z "${HUGGINGFACE_TOKEN:-}" ]; then
-            echo "Missing required secret: HUGGINGFACE_TOKEN"
+          if [ -z "${HF_TOKEN:-}" ]; then
+            echo "Missing required secret: HF_TOKEN (from HUGGINGFACE_TOKEN)"
             exit 1
           fi
 
